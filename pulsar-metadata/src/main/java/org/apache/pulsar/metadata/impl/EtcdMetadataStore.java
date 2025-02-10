@@ -43,10 +43,10 @@ import io.etcd.jetcd.watch.WatchEvent;
 import io.etcd.jetcd.watch.WatchResponse;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
-import io.grpc.netty.GrpcSslContexts;
+import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts;
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslProvider;
 import io.grpc.stub.StreamObserver;
-import io.netty.handler.ssl.SslContext;
-import io.netty.handler.ssl.SslProvider;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -72,8 +72,10 @@ import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.metadata.api.GetResult;
+import org.apache.pulsar.metadata.api.MetadataStore;
 import org.apache.pulsar.metadata.api.MetadataStoreConfig;
 import org.apache.pulsar.metadata.api.MetadataStoreException;
+import org.apache.pulsar.metadata.api.MetadataStoreProvider;
 import org.apache.pulsar.metadata.api.Notification;
 import org.apache.pulsar.metadata.api.NotificationType;
 import org.apache.pulsar.metadata.api.Stat;
@@ -89,6 +91,7 @@ import org.apache.pulsar.metadata.impl.batching.OpPut;
 @Slf4j
 public class EtcdMetadataStore extends AbstractBatchedMetadataStore {
 
+    static final String ETCD_SCHEME = "etcd";
     static final String ETCD_SCHEME_IDENTIFIER = "etcd:";
 
     private final int leaseTTLSeconds;
@@ -106,9 +109,9 @@ public class EtcdMetadataStore extends AbstractBatchedMetadataStore {
         try {
             this.client = newEtcdClient(metadataURL, conf);
             this.kv = client.getKVClient();
-            this.client.getWatchClient().watch(ByteSequence.from("\0", StandardCharsets.UTF_8),
+            this.client.getWatchClient().watch(ByteSequence.from("/", StandardCharsets.UTF_8),
                     WatchOption.newBuilder()
-                            .withPrefix(ByteSequence.from("/", StandardCharsets.UTF_8))
+                            .isPrefix(true)
                             .build(), this::handleWatchResponse);
             if (enableSessionWatcher) {
                 this.sessionWatcher =
@@ -159,22 +162,24 @@ public class EtcdMetadataStore extends AbstractBatchedMetadataStore {
 
     @Override
     public void close() throws Exception {
-        super.close();
+        if (isClosed.compareAndSet(false, true)) {
+            super.close();
 
-        if (sessionWatcher != null) {
-            sessionWatcher.close();
+            if (sessionWatcher != null) {
+                sessionWatcher.close();
+            }
+
+            if (leaseClient != null) {
+                leaseClient.close();
+            }
+
+            if (leaseId != 0) {
+                client.getLeaseClient().revoke(leaseId);
+            }
+
+            kv.close();
+            client.close();
         }
-
-        if (leaseClient != null) {
-            leaseClient.close();
-        }
-
-        if (leaseId != 0) {
-            client.getLeaseClient().revoke(leaseId);
-        }
-
-        kv.close();
-        client.close();
     }
 
     private static final GetOption EXISTS_GET_OPTION = GetOption.newBuilder().withCountOnly(true).build();
@@ -280,7 +285,7 @@ public class EtcdMetadataStore extends AbstractBatchedMetadataStore {
                                 .withKeysOnly(true)
                                 .withSortField(GetOption.SortTarget.KEY)
                                 .withSortOrder(GetOption.SortOrder.ASCEND)
-                                .withPrefix(prefix)
+                                .isPrefix(true)
                                 .build()));
                         break;
                     }
@@ -495,4 +500,18 @@ class EtcdConfig {
     private String tlsCertificateFilePath;
 
     private String authority;
+}
+
+class EtcdMetadataStoreProvider implements MetadataStoreProvider {
+
+    @Override
+    public String urlScheme() {
+        return EtcdMetadataStore.ETCD_SCHEME;
+    }
+
+    @Override
+    public MetadataStore create(String metadataURL, MetadataStoreConfig metadataStoreConfig,
+                                boolean enableSessionWatcher) throws MetadataStoreException {
+        return new EtcdMetadataStore(metadataURL, metadataStoreConfig, enableSessionWatcher);
+    }
 }

@@ -38,6 +38,7 @@ import org.apache.pulsar.broker.authentication.utils.AuthTokenUtils;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.Authentication;
+import org.apache.pulsar.client.api.AuthenticationFactory;
 import org.apache.pulsar.client.api.ClientBuilder;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
@@ -64,25 +65,30 @@ import org.testng.collections.Maps;
 
 public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
     private static final Logger log = LoggerFactory.getLogger(ProxyWithAuthorizationTest.class);
+    private static final String CLUSTER_NAME = "proxy-authorization";
 
     private final SecretKey SECRET_KEY = AuthTokenUtils.createSecretKey(SignatureAlgorithm.HS256);
     private final String CLIENT_TOKEN = AuthTokenUtils.createToken(SECRET_KEY, "Client", Optional.empty());
 
-    private final String TLS_PROXY_TRUST_CERT_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/proxy-cacert.pem";
+    // The Proxy, Client, and SuperUser Client certs are signed by this CA
+    private final String TLS_TRUST_CERT_FILE_PATH = "./src/test/resources/authentication/tls/cacert.pem";
+
+    // Proxy and Broker use valid certs that have no Subject Alternative Name to test hostname verification correctly
+    // fails a connection to an invalid host.
+    private final String TLS_NO_SUBJECT_CERT_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/no-subject-alt-cert.pem";
+    private final String TLS_NO_SUBJECT_KEY_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/no-subject-alt-key.pem";
     private final String TLS_PROXY_CERT_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/proxy-cert.pem";
     private final String TLS_PROXY_KEY_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/proxy-key.pem";
-    private final String TLS_BROKER_TRUST_CERT_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/broker-cacert.pem";
-    private final String TLS_BROKER_CERT_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/broker-cert.pem";
-    private final String TLS_BROKER_KEY_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/broker-key.pem";
     private final String TLS_CLIENT_TRUST_CERT_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/client-cacert.pem";
     private final String TLS_CLIENT_CERT_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/client-cert.pem";
     private final String TLS_CLIENT_KEY_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/client-key.pem";
     private final String TLS_SUPERUSER_CLIENT_KEY_FILE_PATH = "./src/test/resources/authentication/tls/client-key.pem";
     private final String TLS_SUPERUSER_CLIENT_CERT_FILE_PATH = "./src/test/resources/authentication/tls/client-cert.pem";
-    private final String TLS_SUPERUSER_CLIENT_TRUST_CERT_FILE_PATH = "./src/test/resources/authentication/tls/cacert.pem";
 
     private ProxyService proxyService;
+    private WebServer webServer;
     private final ProxyConfiguration proxyConfig = new ProxyConfiguration();
+    private Authentication proxyClientAuthentication;
 
     @DataProvider(name = "hostnameVerification")
     public Object[][] hostnameVerificationCodecProvider() {
@@ -166,26 +172,27 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         conf.setBrokerServicePort(Optional.empty());
         conf.setWebServicePortTls(Optional.of(0));
         conf.setWebServicePort(Optional.empty());
-        conf.setTlsTrustCertsFilePath(TLS_PROXY_TRUST_CERT_FILE_PATH);
-        conf.setTlsCertificateFilePath(TLS_BROKER_CERT_FILE_PATH);
-        conf.setTlsKeyFilePath(TLS_BROKER_KEY_FILE_PATH);
+        conf.setTlsTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH);
+        conf.setTlsCertificateFilePath(TLS_NO_SUBJECT_CERT_FILE_PATH);
+        conf.setTlsKeyFilePath(TLS_NO_SUBJECT_KEY_FILE_PATH);
         conf.setTlsAllowInsecureConnection(false);
 
         Set<String> superUserRoles = new HashSet<>();
         superUserRoles.add("superUser");
+        superUserRoles.add("Proxy");
         conf.setSuperUserRoles(superUserRoles);
 
         conf.setBrokerClientAuthenticationPlugin(AuthenticationTls.class.getName());
         conf.setBrokerClientAuthenticationParameters(
-                "tlsCertFile:" + TLS_BROKER_CERT_FILE_PATH + "," + "tlsKeyFile:" + TLS_BROKER_KEY_FILE_PATH);
-        conf.setBrokerClientTrustCertsFilePath(TLS_BROKER_TRUST_CERT_FILE_PATH);
+                "tlsCertFile:" + TLS_SUPERUSER_CLIENT_CERT_FILE_PATH + "," + "tlsKeyFile:" + TLS_SUPERUSER_CLIENT_KEY_FILE_PATH);
+        conf.setBrokerClientTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH);
         conf.setAuthenticationProviders(Set.of(AuthenticationProviderTls.class.getName(),
                 AuthenticationProviderToken.class.getName()));
         Properties properties = new Properties();
         properties.setProperty("tokenSecretKey", AuthTokenUtils.encodeKeyBase64(SECRET_KEY));
         conf.setProperties(properties);
 
-        conf.setClusterName("proxy-authorization");
+        conf.setClusterName(CLUSTER_NAME);
         conf.setNumExecutorThreadPoolSize(5);
     }
 
@@ -200,20 +207,20 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         proxyConfig.setForwardAuthorizationCredentials(true);
         proxyConfig.setBrokerServiceURL(pulsar.getBrokerServiceUrl());
         proxyConfig.setBrokerServiceURLTLS(pulsar.getBrokerServiceUrlTls());
+        proxyConfig.setBrokerWebServiceURLTLS(pulsar.getWebServiceAddressTls());
         proxyConfig.setAdvertisedAddress(null);
+        proxyConfig.setClusterName(CLUSTER_NAME);
 
-        proxyConfig.setServicePort(Optional.of(0));
         proxyConfig.setBrokerProxyAllowedTargetPorts("*");
         proxyConfig.setServicePortTls(Optional.of(0));
-        proxyConfig.setWebServicePort(Optional.of(0));
         proxyConfig.setWebServicePortTls(Optional.of(0));
         proxyConfig.setTlsEnabledWithBroker(true);
 
         // enable tls and auth&auth at proxy
-        proxyConfig.setTlsCertificateFilePath(TLS_PROXY_CERT_FILE_PATH);
-        proxyConfig.setTlsKeyFilePath(TLS_PROXY_KEY_FILE_PATH);
-        proxyConfig.setTlsTrustCertsFilePath(TLS_CLIENT_TRUST_CERT_FILE_PATH);
-        proxyConfig.setBrokerClientTrustCertsFilePath(TLS_BROKER_TRUST_CERT_FILE_PATH);
+        proxyConfig.setTlsCertificateFilePath(TLS_NO_SUBJECT_CERT_FILE_PATH);
+        proxyConfig.setTlsKeyFilePath(TLS_NO_SUBJECT_KEY_FILE_PATH);
+        proxyConfig.setTlsTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH);
+        proxyConfig.setBrokerClientTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH);
         proxyConfig.setBrokerClientAuthenticationPlugin(AuthenticationTls.class.getName());
         proxyConfig.setBrokerClientAuthenticationParameters(
                 "tlsCertFile:" + TLS_PROXY_CERT_FILE_PATH + "," + "tlsKeyFile:" + TLS_PROXY_KEY_FILE_PATH);
@@ -223,9 +230,14 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         properties.setProperty("tokenSecretKey", AuthTokenUtils.encodeKeyBase64(SECRET_KEY));
         proxyConfig.setProperties(properties);
 
-        proxyService = Mockito.spy(new ProxyService(proxyConfig,
-                                           new AuthenticationService(
-                                                   PulsarConfigurationLoader.convertFrom(proxyConfig))));
+        AuthenticationService authService =
+                new AuthenticationService(PulsarConfigurationLoader.convertFrom(proxyConfig));
+        proxyClientAuthentication = AuthenticationFactory.create(proxyConfig.getBrokerClientAuthenticationPlugin(),
+                proxyConfig.getBrokerClientAuthenticationParameters());
+        proxyClientAuthentication.start();
+        proxyService = Mockito.spy(new ProxyService(proxyConfig, authService, proxyClientAuthentication));
+        proxyService.setGracefulShutdown(false);
+        webServer = new WebServer(proxyConfig, authService);
     }
 
     @AfterMethod(alwaysRun = true)
@@ -233,10 +245,16 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
     protected void cleanup() throws Exception {
         super.internalCleanup();
         proxyService.close();
+        webServer.stop();
+        if (proxyClientAuthentication != null) {
+            proxyClientAuthentication.close();
+        }
     }
 
     private void startProxy() throws Exception {
         proxyService.start();
+        ProxyServiceStarter.addWebServerHandlers(webServer, proxyConfig, proxyService, null, proxyClientAuthentication);
+        webServer.start();
     }
 
     /**
@@ -258,23 +276,15 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         log.info("-- Starting {} test --", methodName);
 
         startProxy();
-        createAdminClient();
+        // Skip hostname verification because the certs intentionally do not have a hostname
+        createProxyAdminClient(false);
         // create a client which connects to proxy over tls and pass authData
         @Cleanup
         PulsarClient proxyClient = createPulsarClient(proxyService.getServiceUrlTls(), PulsarClient.builder());
 
         String namespaceName = "my-tenant/my-ns";
 
-        admin.clusters().createCluster("proxy-authorization", ClusterData.builder().serviceUrlTls(brokerUrlTls.toString()).build());
-
-        admin.tenants().createTenant("my-tenant",
-                new TenantInfoImpl(Sets.newHashSet("appid1", "appid2"), Sets.newHashSet("proxy-authorization")));
-        admin.namespaces().createNamespace(namespaceName);
-
-        admin.namespaces().grantPermissionOnNamespace(namespaceName, "Proxy",
-                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
-        admin.namespaces().grantPermissionOnNamespace(namespaceName, "Client",
-                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
+        initializeCluster(admin, namespaceName);
 
         Consumer<byte[]> consumer = proxyClient.newConsumer()
                 .topic("persistent://my-tenant/my-ns/my-topic1")
@@ -311,7 +321,8 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         log.info("-- Starting {} test --", methodName);
 
         startProxy();
-        createAdminClient();
+        // Testing client to proxy hostname verification, so use the dataProvider's value here
+        createProxyAdminClient(hostnameVerificationEnabled);
         // create a client which connects to proxy over tls and pass authData
         @Cleanup
         PulsarClient proxyClient = createPulsarClient(proxyService.getServiceUrlTls(),
@@ -319,16 +330,21 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
 
         String namespaceName = "my-tenant/my-ns";
 
-        admin.clusters().createCluster("proxy-authorization", ClusterData.builder().serviceUrl(brokerUrlTls.toString()).build());
-
-        admin.tenants().createTenant("my-tenant",
-                new TenantInfoImpl(Sets.newHashSet("appid1", "appid2"), Sets.newHashSet("proxy-authorization")));
-        admin.namespaces().createNamespace(namespaceName);
-
-        admin.namespaces().grantPermissionOnNamespace(namespaceName, "Proxy",
-                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
-        admin.namespaces().grantPermissionOnNamespace(namespaceName, "Client",
-                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
+        try {
+            initializeCluster(admin, namespaceName);
+            if (hostnameVerificationEnabled) {
+                Assert.fail("Connection should be failed due to hostnameVerification enabled");
+            }
+        } catch (PulsarAdminException e) {
+            if (!hostnameVerificationEnabled) {
+                Assert.fail("Cluster should initialize because hostnameverification is disabled");
+            }
+            admin.close();
+            // Need new client because the admin client to proxy is failing due to hostname verification, and we still
+            // want to test the binary protocol client fails to connect as well
+            createProxyAdminClient(false);
+            initializeCluster(admin, namespaceName);
+        }
 
         try {
             proxyClient.newConsumer().topic("persistent://my-tenant/my-ns/my-topic1")
@@ -363,7 +379,8 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
 
         proxyConfig.setTlsHostnameVerificationEnabled(hostnameVerificationEnabled);
         startProxy();
-        createAdminClient();
+        // This test skips hostname verification for client to proxy in order to test proxy to broker
+        createProxyAdminClient(false);
         // create a client which connects to proxy over tls and pass authData
         @Cleanup
         PulsarClient proxyClient = createPulsarClient(proxyService.getServiceUrlTls(),
@@ -371,16 +388,22 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
 
         String namespaceName = "my-tenant/my-ns";
 
-        admin.clusters().createCluster("proxy-authorization", ClusterData.builder().serviceUrlTls(brokerUrlTls.toString()).build());
-
-        admin.tenants().createTenant("my-tenant",
-                new TenantInfoImpl(Sets.newHashSet("appid1", "appid2"), Sets.newHashSet("proxy-authorization")));
-        admin.namespaces().createNamespace(namespaceName);
-
-        admin.namespaces().grantPermissionOnNamespace(namespaceName, "Proxy",
-                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
-        admin.namespaces().grantPermissionOnNamespace(namespaceName, "Client",
-                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
+        try {
+            initializeCluster(admin, namespaceName);
+            if (hostnameVerificationEnabled) {
+                Assert.fail("Connection should be failed due to hostnameVerification enabled for proxy to broker");
+            }
+        } catch (PulsarAdminException.ServerSideErrorException e) {
+            if (!hostnameVerificationEnabled) {
+                Assert.fail("Cluster should initialize because hostnameverification is disabled for proxy to broker");
+            }
+            Assert.assertEquals(e.getStatusCode(), 502, "Should get bad gateway");
+            admin.close();
+            // Need to use broker's admin client because the proxy to broker is failing, and we still want to test
+            // the binary protocol client fails to connect as well
+            createBrokerAdminClient();
+            initializeCluster(admin, namespaceName);
+        }
 
         try {
             proxyClient.newConsumer().topic("persistent://my-tenant/my-ns/my-topic1")
@@ -408,18 +431,9 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
             throws Exception {
         log.info("-- Starting {} test --", methodName);
         String namespaceName = "my-tenant/my-ns";
-        createAdminClient();
+        createBrokerAdminClient();
 
-        admin.clusters().createCluster("proxy-authorization", ClusterData.builder().serviceUrl(brokerUrlTls.toString()).build());
-
-        admin.tenants().createTenant("my-tenant",
-                new TenantInfoImpl(Sets.newHashSet("appid1", "appid2"), Sets.newHashSet("proxy-authorization")));
-        admin.namespaces().createNamespace(namespaceName);
-
-        admin.namespaces().grantPermissionOnNamespace(namespaceName, "Proxy",
-                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
-        admin.namespaces().grantPermissionOnNamespace(namespaceName, "Client",
-                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
+        initializeCluster(admin, namespaceName);
 
         ProxyConfiguration proxyConfig = new ProxyConfiguration();
         proxyConfig.setAuthenticationEnabled(true);
@@ -428,6 +442,7 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         proxyConfig.setBrokerServiceURL(pulsar.getBrokerServiceUrl());
         proxyConfig.setBrokerServiceURLTLS(pulsar.getBrokerServiceUrlTls());
         proxyConfig.setAdvertisedAddress(null);
+        proxyConfig.setClusterName(CLUSTER_NAME);
 
         proxyConfig.setServicePort(Optional.of(0));
         proxyConfig.setBrokerProxyAllowedTargetPorts("*");
@@ -444,7 +459,7 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         proxyConfig.setBrokerClientAuthenticationPlugin(AuthenticationTls.class.getName());
         proxyConfig.setBrokerClientAuthenticationParameters(
                 "tlsCertFile:" + TLS_PROXY_CERT_FILE_PATH + "," + "tlsKeyFile:" + TLS_PROXY_KEY_FILE_PATH);
-        proxyConfig.setBrokerClientTrustCertsFilePath(TLS_BROKER_TRUST_CERT_FILE_PATH);
+        proxyConfig.setBrokerClientTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH);
         Set<String> providers = new HashSet<>();
         providers.add(AuthenticationProviderTls.class.getName());
         conf.setAuthenticationProviders(providers);
@@ -452,9 +467,16 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         proxyConfig.setTlsProtocols(tlsProtocols);
         proxyConfig.setTlsCiphers(tlsCiphers);
 
+        @Cleanup
+        final Authentication proxyClientAuthentication = AuthenticationFactory.create(proxyConfig.getBrokerClientAuthenticationPlugin(),
+                proxyConfig.getBrokerClientAuthenticationParameters());
+        proxyClientAuthentication.start();
+
+        @Cleanup
         ProxyService proxyService = Mockito.spy(new ProxyService(proxyConfig,
                                                         new AuthenticationService(
-                                                                PulsarConfigurationLoader.convertFrom(proxyConfig))));
+                                                                PulsarConfigurationLoader.convertFrom(proxyConfig)), proxyClientAuthentication));
+        proxyService.setGracefulShutdown(false);
         try {
             proxyService.start();
         } catch (Exception ex) {
@@ -506,7 +528,8 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         log.info("-- Starting {} test --", methodName);
 
         startProxy();
-        createAdminClient();
+        // Skip hostname verification because the certs intentionally do not have a hostname
+        createProxyAdminClient(false);
 
         @Cleanup
         PulsarClient proxyClient = PulsarClient.builder()
@@ -515,23 +538,13 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
                 .authentication(auth)
                 .tlsKeyFilePath(TLS_CLIENT_KEY_FILE_PATH)
                 .tlsCertificateFilePath(TLS_CLIENT_CERT_FILE_PATH)
-                .tlsTrustCertsFilePath(TLS_PROXY_TRUST_CERT_FILE_PATH)
+                .tlsTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH)
                 .operationTimeout(1000, TimeUnit.MILLISECONDS)
                 .build();
 
         String namespaceName = "my-tenant/my-ns";
 
-        admin.clusters().createCluster("proxy-authorization",
-                ClusterData.builder().serviceUrlTls(brokerUrlTls.toString()).build());
-
-        admin.tenants().createTenant("my-tenant",
-                new TenantInfoImpl(Sets.newHashSet("appid1", "appid2"), Sets.newHashSet("proxy-authorization")));
-        admin.namespaces().createNamespace(namespaceName);
-
-        admin.namespaces().grantPermissionOnNamespace(namespaceName, "Proxy",
-                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
-        admin.namespaces().grantPermissionOnNamespace(namespaceName, "Client",
-                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
+        initializeCluster(admin, namespaceName);
 
         Consumer<byte[]> consumer = proxyClient.newConsumer()
                 .topic("persistent://my-tenant/my-ns/my-topic1")
@@ -563,13 +576,38 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         log.info("-- Exiting {} test --", methodName);
     }
 
-    private void createAdminClient() throws Exception {
+    private void initializeCluster(PulsarAdmin adminClient, String namespaceName) throws Exception {
+        adminClient.clusters().createCluster("proxy-authorization", ClusterData.builder()
+                .serviceUrlTls(brokerUrlTls.toString()).build());
+
+        adminClient.tenants().createTenant("my-tenant",
+                new TenantInfoImpl(Sets.newHashSet("appid1", "appid2"), Sets.newHashSet("proxy-authorization")));
+        adminClient.namespaces().createNamespace(namespaceName);
+
+        adminClient.namespaces().grantPermissionOnNamespace(namespaceName, "Proxy",
+                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
+        adminClient.namespaces().grantPermissionOnNamespace(namespaceName, "Client",
+                Sets.newHashSet(AuthAction.consume, AuthAction.produce));
+    }
+
+    private void createProxyAdminClient(boolean enableTlsHostnameVerification) throws Exception {
         Map<String, String> authParams = Maps.newHashMap();
         authParams.put("tlsCertFile", TLS_SUPERUSER_CLIENT_CERT_FILE_PATH);
         authParams.put("tlsKeyFile", TLS_SUPERUSER_CLIENT_KEY_FILE_PATH);
+        closeAdmin();
+        admin = spy(PulsarAdmin.builder().serviceHttpUrl("https://localhost:" + webServer.getListenPortHTTPS().get())
+                .tlsTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH)
+                .enableTlsHostnameVerification(enableTlsHostnameVerification)
+                .authentication(AuthenticationTls.class.getName(), authParams).build());
+    }
 
+    private void createBrokerAdminClient() throws Exception {
+        Map<String, String> authParams = Maps.newHashMap();
+        authParams.put("tlsCertFile", TLS_SUPERUSER_CLIENT_CERT_FILE_PATH);
+        authParams.put("tlsKeyFile", TLS_SUPERUSER_CLIENT_KEY_FILE_PATH);
+        closeAdmin();
         admin = spy(PulsarAdmin.builder().serviceHttpUrl(brokerUrlTls.toString())
-                .tlsTrustCertsFilePath(TLS_BROKER_TRUST_CERT_FILE_PATH)
+                .tlsTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH)
                 .authentication(AuthenticationTls.class.getName(), authParams).build());
     }
 
@@ -583,7 +621,7 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         authTls.configure(authParams);
 
         return clientBuilder.serviceUrl(proxyServiceUrl).statsInterval(0, TimeUnit.SECONDS)
-                .tlsTrustCertsFilePath(TLS_PROXY_TRUST_CERT_FILE_PATH)
+                .tlsTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH)
                 .authentication(authTls).enableTls(true)
                 .operationTimeout(1000, TimeUnit.MILLISECONDS).build();
     }

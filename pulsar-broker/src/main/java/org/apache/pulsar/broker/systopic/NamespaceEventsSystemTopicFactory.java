@@ -37,19 +37,21 @@ public class NamespaceEventsSystemTopicFactory {
     }
 
     public TopicPoliciesSystemTopicClient createTopicPoliciesSystemTopicClient(NamespaceName namespaceName) {
-        TopicName topicName = TopicName.get(TopicDomain.persistent.value(), namespaceName,
-                SystemTopicNames.NAMESPACE_EVENTS_LOCAL_NAME);
+        TopicName topicName = getEventsTopicName(namespaceName);
         log.info("Create topic policies system topic client {}", topicName.toString());
         return new TopicPoliciesSystemTopicClient(client, topicName);
     }
 
+    public static TopicName getEventsTopicName(NamespaceName namespaceName) {
+        return TopicName.get(TopicDomain.persistent.value(), namespaceName,
+                SystemTopicNames.NAMESPACE_EVENTS_LOCAL_NAME);
+    }
+
     public <T> TransactionBufferSnapshotBaseSystemTopicClient<T> createTransactionBufferSystemTopicClient(
-            NamespaceName namespaceName, SystemTopicTxnBufferSnapshotService<T>
+            TopicName systemTopicName, SystemTopicTxnBufferSnapshotService<T>
             systemTopicTxnBufferSnapshotService, Class<T> schemaType) {
-        TopicName topicName = TopicName.get(TopicDomain.persistent.value(), namespaceName,
-                SystemTopicNames.TRANSACTION_BUFFER_SNAPSHOT);
-        log.info("Create transaction buffer snapshot client, topicName : {}", topicName.toString());
-        return new TransactionBufferSnapshotBaseSystemTopicClient(client, topicName,
+        log.info("Create transaction buffer snapshot client, topicName : {}", systemTopicName.toString());
+        return new TransactionBufferSnapshotBaseSystemTopicClient(client, systemTopicName,
                 systemTopicTxnBufferSnapshotService, schemaType);
     }
 

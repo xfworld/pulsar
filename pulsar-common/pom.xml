@@ -26,8 +26,7 @@
   <parent>
     <groupId>org.apache.pulsar</groupId>
     <artifactId>pulsar</artifactId>
-    <version>2.12.0-SNAPSHOT</version>
-    <relativePath>..</relativePath>
+    <version>4.1.0-SNAPSHOT</version>
   </parent>
 
   <artifactId>pulsar-common</artifactId>
@@ -50,6 +49,7 @@
     <dependency>
       <groupId>io.swagger</groupId>
       <artifactId>swagger-annotations</artifactId>
+      <scope>provided</scope>
     </dependency>
 
     <dependency>
@@ -60,6 +60,21 @@
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.fasterxml.jackson.module</groupId>
+      <artifactId>jackson-module-parameter-names</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jdk8</artifactId>
     </dependency>
 
     <dependency>
@@ -85,8 +100,13 @@
 
     <dependency>
       <groupId>io.netty</groupId>
+      <artifactId>netty-transport-native-epoll</artifactId>
+      <classifier>linux-aarch_64</classifier>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
       <artifactId>netty-transport-native-unix-common</artifactId>
-      <classifier>linux-x86_64</classifier>
     </dependency>
 
     <dependency>
@@ -164,8 +184,8 @@
     </dependency>
 
     <dependency>
-      <groupId>javax.ws.rs</groupId>
-      <artifactId>javax.ws.rs-api</artifactId>
+      <groupId>jakarta.ws.rs</groupId>
+      <artifactId>jakarta.ws.rs-api</artifactId>
     </dependency>
 
     <dependency>
@@ -179,10 +199,15 @@
       <scope>provided</scope>
       <optional>true</optional>
     </dependency>
-    
+
     <dependency>
-      <groupId>com.google.protobuf</groupId>
-	  <artifactId>protobuf-java</artifactId>
+      <groupId>com.google.re2j</groupId>
+      <artifactId>re2j</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.spotify</groupId>
+      <artifactId>completable-futures</artifactId>
     </dependency>
 
     <!-- test -->
@@ -211,14 +236,10 @@
       <artifactId>snappy-java</artifactId>
       <scope>test</scope>
     </dependency>
+
     <dependency>
       <groupId>com.google.code.gson</groupId>
       <artifactId>gson</artifactId>
-    </dependency>
-
-    <dependency>
-      <groupId>com.beust</groupId>
-      <artifactId>jcommander</artifactId>
     </dependency>
 
     <dependency>
@@ -268,6 +289,38 @@
           </execution>
         </executions>
       </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>${build-helper-maven-plugin.version}</version>
+        <executions>
+          <execution>
+            <id>add-source</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>target/generated-sources/protobuf/java</source>
+              </sources>
+            </configuration>
+          </execution>
+          <execution>
+            <id>add-test-source</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-test-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>target/generated-test-sources/protobuf/java</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
 
       <plugin>
         <groupId>pl.project13.maven</groupId>
@@ -281,6 +334,7 @@
           </execution>
         </executions>
         <configuration>
+          <skip>false</skip>
           <useNativeGit>true</useNativeGit>
           <prefix>git</prefix>
           <verbose>false</verbose>

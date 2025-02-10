@@ -18,7 +18,9 @@
  */
 package org.apache.bookkeeper.client;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import com.google.common.collect.Lists;
+import io.netty.util.concurrent.DefaultThreadFactory;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -34,9 +36,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import lombok.Getter;
+import lombok.Setter;
 import org.apache.bookkeeper.client.AsyncCallback.CreateCallback;
 import org.apache.bookkeeper.client.AsyncCallback.DeleteCallback;
 import org.apache.bookkeeper.client.AsyncCallback.OpenCallback;
@@ -69,6 +74,7 @@ public class PulsarMockBookKeeper extends BookKeeper {
 
     final OrderedExecutor orderedExecutor;
     final ExecutorService executor;
+    final ScheduledExecutorService scheduler;
 
     @Override
     public ClientConfiguration getConf() {
@@ -89,11 +95,17 @@ public class PulsarMockBookKeeper extends BookKeeper {
     }
 
     final Queue<Long> addEntryDelaysMillis = new ConcurrentLinkedQueue<>();
+    final Queue<Long> addEntryResponseDelaysMillis = new ConcurrentLinkedQueue<>();
     final List<CompletableFuture<Void>> failures = new ArrayList<>();
+    final List<CompletableFuture<Void>> addEntryFailures = new ArrayList<>();
+    @Setter
+    @Getter
+    private volatile PulsarMockReadHandleInterceptor readHandleInterceptor;
 
     public PulsarMockBookKeeper(OrderedExecutor orderedExecutor) throws Exception {
         this.orderedExecutor = orderedExecutor;
         this.executor = orderedExecutor.chooseThread();
+        scheduler = Executors.newScheduledThreadPool(1, new DefaultThreadFactory("mock-bk-scheduler"));
     }
 
     @Override
@@ -102,13 +114,13 @@ public class PulsarMockBookKeeper extends BookKeeper {
     }
 
     @Override
-    public LedgerHandle createLedger(DigestType digestType, byte passwd[])
+    public LedgerHandle createLedger(DigestType digestType, byte[] passwd)
             throws BKException, InterruptedException {
         return createLedger(3, 2, digestType, passwd);
     }
 
     @Override
-    public LedgerHandle createLedger(int ensSize, int qSize, DigestType digestType, byte passwd[])
+    public LedgerHandle createLedger(int ensSize, int qSize, DigestType digestType, byte[] passwd)
             throws BKException, InterruptedException {
         return createLedger(ensSize, qSize, qSize, digestType, passwd);
     }
@@ -243,7 +255,8 @@ public class PulsarMockBookKeeper extends BookKeeper {
                                 return FutureUtils.exception(new BKException.BKUnauthorizedAccessException());
                             } else {
                                 return FutureUtils.value(new PulsarMockReadHandle(PulsarMockBookKeeper.this, ledgerId,
-                                                                                  lh.getLedgerMetadata(), lh.entries));
+                                        lh.getLedgerMetadata(), lh.entries,
+                                        PulsarMockBookKeeper.this::getReadHandleInterceptor));
                             }
                         });
             }
@@ -287,7 +300,7 @@ public class PulsarMockBookKeeper extends BookKeeper {
         for (PulsarMockLedgerHandle ledger : ledgers.values()) {
             ledger.entries.clear();
         }
-
+        scheduler.shutdown();
         ledgers.clear();
     }
 
@@ -317,16 +330,36 @@ public class PulsarMockBookKeeper extends BookKeeper {
         return shouldFailNow;
     }
 
+    synchronized CompletableFuture<Void> getAddEntryFailure() {
+        if (!addEntryFailures.isEmpty()){
+            return addEntryFailures.remove(0);
+        }
+        return failures.isEmpty() ? defaultResponse : failures.remove(0);
+    }
+
     synchronized CompletableFuture<Void> getProgrammedFailure() {
         return failures.isEmpty() ? defaultResponse : failures.remove(0);
     }
+
+    public void delay(long millis) {
+        CompletableFuture<Void> delayFuture = new CompletableFuture<>();
+        scheduler.schedule(() -> {
+            delayFuture.complete(null);
+        }, millis, TimeUnit.MILLISECONDS);
+        failures.add(delayFuture);
+    }
+
 
     public void failNow(int rc) {
         failAfter(0, rc);
     }
 
     public void failAfter(int steps, int rc) {
-        promiseAfter(steps).completeExceptionally(BKException.create(rc));
+        promiseAfter(steps, failures).completeExceptionally(BKException.create(rc));
+    }
+
+    public void addEntryFailAfter(int steps, int rc) {
+        promiseAfter(steps, addEntryFailures).completeExceptionally(BKException.create(rc));
     }
 
     private int emptyLedgerAfter = -1;
@@ -339,6 +372,10 @@ public class PulsarMockBookKeeper extends BookKeeper {
     }
 
     public synchronized CompletableFuture<Void> promiseAfter(int steps) {
+        return promiseAfter(steps, failures);
+    }
+
+    public synchronized CompletableFuture<Void> promiseAfter(int steps, List<CompletableFuture<Void>> failures) {
         while (failures.size() <= steps) {
             failures.add(defaultResponse);
         }
@@ -349,6 +386,11 @@ public class PulsarMockBookKeeper extends BookKeeper {
 
     public synchronized void addEntryDelay(long delay, TimeUnit unit) {
         addEntryDelaysMillis.add(unit.toMillis(delay));
+    }
+
+    public synchronized void addEntryResponseDelay(long delay, TimeUnit unit) {
+        checkArgument(delay >= 0, "The delay time must not be negative.");
+        addEntryResponseDelaysMillis.add(unit.toMillis(delay));
     }
 
     static int getExceptionCode(Throwable t) {

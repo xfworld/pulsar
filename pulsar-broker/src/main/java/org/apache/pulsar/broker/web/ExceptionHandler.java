@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletResponse;
 import javax.ws.rs.core.Response;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.common.intercept.InterceptException;
 import org.apache.pulsar.common.policies.data.ErrorData;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
@@ -36,13 +37,14 @@ import org.eclipse.jetty.http.MetaData;
 /**
  *  Exception handler for handle exception.
  */
+@Slf4j
 public class ExceptionHandler {
 
     public void handle(ServletResponse response, Exception ex) throws IOException {
         if (ex instanceof InterceptException) {
             if (response instanceof org.eclipse.jetty.server.Response) {
                 String errorData = ObjectMapperFactory
-                        .getThreadLocal().writeValueAsString(new ErrorData(ex.getMessage()));
+                        .getMapper().writer().writeValueAsString(new ErrorData(ex.getMessage()));
                 byte[] errorBytes = errorData.getBytes(StandardCharsets.UTF_8);
                 int errorCode = ((InterceptException) ex).getErrorCode();
                 HttpFields httpFields = new HttpFields();

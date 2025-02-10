@@ -66,7 +66,7 @@ public class LocalPoliciesResources extends BaseResources<LocalPolicies> {
     public CompletableFuture<Void> setLocalPoliciesWithVersion(NamespaceName ns, LocalPolicies policies,
                                                                Optional<Long> version) {
         try {
-            byte[] content = ObjectMapperFactory.getThreadLocal().writeValueAsBytes(policies);
+            byte[] content = ObjectMapperFactory.getMapper().writer().writeValueAsBytes(policies);
             return getStore().put(joinPath(LOCAL_POLICIES_ROOT, ns.toString()), content, version)
                     .thenApply(__ -> null);
         } catch (JsonProcessingException e) {
@@ -79,13 +79,13 @@ public class LocalPoliciesResources extends BaseResources<LocalPolicies> {
     }
 
     public CompletableFuture<Void> deleteLocalPoliciesAsync(NamespaceName ns) {
-        return deleteAsync(joinPath(LOCAL_POLICIES_ROOT, ns.toString()));
+        return deleteIfExistsAsync(joinPath(LOCAL_POLICIES_ROOT, ns.toString()));
     }
 
     public CompletableFuture<Void> deleteLocalPoliciesTenantAsync(String tenant) {
         final String localPoliciesPath = joinPath(LOCAL_POLICIES_ROOT, tenant);
         CompletableFuture<Void> future = new CompletableFuture<Void>();
-        deleteAsync(localPoliciesPath).whenComplete((ignore, ex) -> {
+        deleteIfExistsAsync(localPoliciesPath).whenComplete((ignore, ex) -> {
             if (ex != null && ex.getCause().getCause() instanceof KeeperException) {
                 future.complete(null);
             } else if (ex != null) {

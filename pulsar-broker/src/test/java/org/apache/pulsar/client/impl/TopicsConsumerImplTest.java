@@ -21,6 +21,7 @@ package org.apache.pulsar.client.impl;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import io.netty.util.Timeout;
+import java.time.Duration;
 import lombok.Cleanup;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.impl.ManagedCursorImpl;
@@ -30,8 +31,11 @@ import org.apache.pulsar.broker.service.persistent.PersistentSubscription;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.Consumer;
+import org.apache.pulsar.client.api.ConsumerEventListener;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageId;
+import org.apache.pulsar.client.api.MessageIdAdv;
+import org.apache.pulsar.client.api.MessageListener;
 import org.apache.pulsar.client.api.MessageRouter;
 import org.apache.pulsar.client.api.MessageRoutingMode;
 import org.apache.pulsar.client.api.Producer;
@@ -41,7 +45,9 @@ import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.client.api.SubscriptionType;
+import org.apache.pulsar.client.api.TopicMessageId;
 import org.apache.pulsar.client.api.TopicMetadata;
+import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.ClusterData;
 import org.apache.pulsar.common.policies.data.PartitionedTopicStats;
 import org.apache.pulsar.common.policies.data.SubscriptionStats;
@@ -53,22 +59,27 @@ import org.slf4j.LoggerFactory;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
-
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.Set;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -125,6 +136,24 @@ public class TopicsConsumerImplTest extends ProducerConsumerBase {
         } catch (IllegalArgumentException e) {
             // expected for have different namespace
         }
+    }
+
+    @Test(timeOut = testTimeout)
+    public void testRetryClusterTopic() throws Exception {
+        String key = "testRetryClusterTopic";
+        final String topicName = "persistent://prop/use/ns-abc1/topic-1-" + key;
+        TenantInfoImpl tenantInfo = createDefaultTenantInfo();
+        final String namespace = "prop/ns-abc1";
+        admin.tenants().createTenant("prop", tenantInfo);
+        admin.namespaces().createNamespace(namespace, Set.of("test"));
+        Consumer consumer = pulsarClient.newConsumer()
+                .topic(topicName)
+                .subscriptionName("my-sub")
+                .subscriptionType(SubscriptionType.Shared)
+                .enableRetry(true)
+                .ackTimeout(ackTimeOutMillis, TimeUnit.MILLISECONDS)
+                .subscribe();
+        assertTrue(consumer instanceof MultiTopicsConsumerImpl);
     }
 
     @Test(timeOut = testTimeout)
@@ -1096,6 +1125,11 @@ public class TopicsConsumerImplTest extends ProducerConsumerBase {
         admin.topics().createPartitionedTopic(topicName2, 2);
         admin.topics().createPartitionedTopic(topicName3, 3);
 
+        final Set<String> topics = new HashSet<>();
+        topics.add(topicName1);
+        IntStream.range(0, 2).forEach(i -> topics.add(topicName2 + TopicName.PARTITIONED_TOPIC_SUFFIX + i));
+        IntStream.range(0, 3).forEach(i -> topics.add(topicName3 + TopicName.PARTITIONED_TOPIC_SUFFIX + i));
+
         // 1. producer connect
         Producer<byte[]> producer1 = pulsarClient.newProducer().topic(topicName1)
             .enableBatching(false)
@@ -1145,11 +1179,26 @@ public class TopicsConsumerImplTest extends ProducerConsumerBase {
             }
         });
 
+        List<TopicMessageId> msgIds = consumer.getLastMessageIds();
+        assertEquals(msgIds.size(), 6);
+        assertEquals(msgIds.stream().map(TopicMessageId::getOwnerTopic).collect(Collectors.toSet()), topics);
+        for (TopicMessageId msgId : msgIds) {
+            int numMessages = (int) ((MessageIdAdv) msgId).getEntryId() + 1;
+            if (msgId.getOwnerTopic().equals(topicName1)) {
+                assertEquals(numMessages, totalMessages);
+            } else if (msgId.getOwnerTopic().startsWith(topicName2)) {
+                assertEquals(numMessages, totalMessages / 2);
+            } else {
+                assertEquals(numMessages, totalMessages / 3);
+            }
+        }
+
         for (int i = 0; i < totalMessages; i++) {
             producer1.send((messagePredicate + "producer1-" + i).getBytes());
             producer2.send((messagePredicate + "producer2-" + i).getBytes());
             producer3.send((messagePredicate + "producer3-" + i).getBytes());
         }
+
 
         messageId = consumer.getLastMessageId();
         assertTrue(messageId instanceof MultiMessageIdImpl);
@@ -1168,6 +1217,20 @@ public class TopicsConsumerImplTest extends ProducerConsumerBase {
                 assertEquals(messageId1.entryId,  totalMessages * 2 / 3  - 1);
             }
         });
+
+        msgIds = consumer.getLastMessageIds();
+        assertEquals(msgIds.size(), 6);
+        assertEquals(msgIds.stream().map(TopicMessageId::getOwnerTopic).collect(Collectors.toSet()), topics);
+        for (TopicMessageId msgId : msgIds) {
+            int numMessages = (int) ((MessageIdAdv) msgId).getEntryId() + 1;
+            if (msgId.getOwnerTopic().equals(topicName1)) {
+                assertEquals(numMessages, totalMessages * 2);
+            } else if (msgId.getOwnerTopic().startsWith(topicName2)) {
+                assertEquals(numMessages, totalMessages);
+            } else {
+                assertEquals(numMessages, totalMessages / 3 * 2);
+            }
+        }
 
         consumer.unsubscribe();
         consumer.close();
@@ -1277,7 +1340,6 @@ public class TopicsConsumerImplTest extends ProducerConsumerBase {
         Assert.assertEquals(consumer.allTopicPartitionsNumber.intValue(), 2);
 
         admin.topics().updatePartitionedTopic(topicName0, 5);
-        consumer.getPartitionsAutoUpdateTimeout().task().run(consumer.getPartitionsAutoUpdateTimeout());
 
         Awaitility.await().untilAsserted(() -> {
             Assert.assertEquals(consumer.getPartitionsOfTheTopicMap(), 5);
@@ -1289,6 +1351,7 @@ public class TopicsConsumerImplTest extends ProducerConsumerBase {
         assertEquals(admin.topics().getPartitionedTopicMetadata(topicName1).partitions, 3);
 
         consumer.getRecheckPatternTimeout().task().run(consumer.getRecheckPatternTimeout());
+        Assert.assertTrue(consumer.getRecheckPatternTimeout().isCancelled());
 
         Awaitility.await().untilAsserted(() -> {
             Assert.assertEquals(consumer.getPartitionsOfTheTopicMap(), 8);
@@ -1296,12 +1359,167 @@ public class TopicsConsumerImplTest extends ProducerConsumerBase {
         });
 
         admin.topics().updatePartitionedTopic(topicName1, 5);
-        consumer.getPartitionsAutoUpdateTimeout().task().run(consumer.getPartitionsAutoUpdateTimeout());
 
-        Awaitility.await().untilAsserted(() -> {
+        Awaitility.await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
             Assert.assertEquals(consumer.getPartitionsOfTheTopicMap(), 10);
             Assert.assertEquals(consumer.allTopicPartitionsNumber.intValue(), 10);
         });
     }
 
+    @Test
+    public void testTopicsDistribution() throws Exception {
+        final String topic = "topics-distribution";
+        final int topicCount = 100;
+        final int consumers = 10;
+
+        for (int i = 0; i < topicCount; i++) {
+            admin.topics().createNonPartitionedTopic(topic + "-" + i);
+        }
+
+        CustomizedConsumerEventListener eventListener = new CustomizedConsumerEventListener();
+
+        List<Consumer<?>> consumerList = new ArrayList<>(consumers);
+        for (int i = 0; i < consumers; i++) {
+            consumerList.add(pulsarClient.newConsumer()
+                    .topics(IntStream.range(0, topicCount).mapToObj(j -> topic + "-" + j).toList())
+                    .subscriptionType(SubscriptionType.Failover)
+                    .subscriptionName("my-sub")
+                    .consumerName("consumer-" + i)
+                    .consumerEventListener(eventListener)
+                    .subscribe());
+        }
+
+        log.info("Topics are distributed to consumers as {}", eventListener.getActiveConsumers());
+        Map<String, Integer> assigned = new HashMap<>();
+        eventListener.getActiveConsumers().forEach((k, v) -> assigned.compute(v, (t, c) -> c == null ? 1 : ++ c));
+        assertEquals(assigned.size(), consumers);
+        for (Consumer<?> consumer : consumerList) {
+            consumer.close();
+        }
+    }
+
+    @Test
+    public void testPartitionedTopicDistribution() throws Exception {
+        this.conf.setActiveConsumerFailoverConsistentHashing(true);
+        final String topic = "partitioned-topics-distribution";
+        final int topicCount = 100;
+        final int consumers = 10;
+
+        for (int i = 0; i < topicCount; i++) {
+            admin.topics().createPartitionedTopic(topic + "-" + i, 1);
+        }
+
+        CustomizedConsumerEventListener eventListener = new CustomizedConsumerEventListener();
+
+        List<Consumer<?>> consumerList = new ArrayList<>(consumers);
+        for (int i = 0; i < consumers; i++) {
+            consumerList.add(pulsarClient.newConsumer()
+                    .topics(IntStream.range(0, topicCount).mapToObj(j -> topic + "-" + j).toList())
+                    .subscriptionType(SubscriptionType.Failover)
+                    .subscriptionName("my-sub")
+                    .consumerName("consumer-" + i)
+                    .consumerEventListener(eventListener)
+                    .subscribe());
+        }
+
+        log.info("Topics are distributed to consumers as {}", eventListener.getActiveConsumers());
+        Map<String, Integer> assigned = new HashMap<>();
+        eventListener.getActiveConsumers().forEach((k, v) -> assigned.compute(v, (t, c) -> c == null ? 1 : ++ c));
+        assertEquals(assigned.size(), consumers);
+        for (Consumer<?> consumer : consumerList) {
+            consumer.close();
+        }
+    }
+
+    private static class CustomizedConsumerEventListener implements ConsumerEventListener {
+
+        private final Map<String, String> activeConsumers = new HashMap<>();
+
+        @Override
+        public void becameActive(Consumer<?> consumer, int partitionId) {
+            activeConsumers.put(consumer.getTopic(), consumer.getConsumerName());
+        }
+
+        @Override
+        public void becameInactive(Consumer<?> consumer, int partitionId) {
+            //no-op
+        }
+
+        public Map<String, String> getActiveConsumers() {
+            return activeConsumers;
+        }
+    }
+
+    @DataProvider
+    public static Object[][] seekByFunction() {
+        return new Object[][] {
+                { true }, { false }
+        };
+    }
+
+    @Test(timeOut = 30000, dataProvider = "seekByFunction")
+    public void testSeekToNewerPosition(boolean seekByFunction) throws Exception {
+        final var topic1 = TopicName.get(newTopicName()).toString()
+                .replace("my-property", "public").replace("my-ns", "default");
+        final var topic2 = TopicName.get(newTopicName()).toString()
+                .replace("my-property", "public").replace("my-ns", "default");
+        @Cleanup final var producer1 = pulsarClient.newProducer(Schema.STRING).topic(topic1).create();
+        @Cleanup final var producer2 = pulsarClient.newProducer(Schema.STRING).topic(topic2).create();
+        producer1.send("1-0");
+        producer2.send("2-0");
+        producer1.send("1-1");
+        producer2.send("2-1");
+        final var consumer1 = pulsarClient.newConsumer(Schema.STRING)
+                .topics(Arrays.asList(topic1, topic2)).subscriptionName("sub")
+                .ackTimeout(1, TimeUnit.SECONDS)
+                .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest).subscribe();
+        final var timestamps = new ArrayList<Long>();
+        for (int i = 0; i < 4; i++) {
+            timestamps.add(consumer1.receive().getPublishTime());
+        }
+        timestamps.sort(Comparator.naturalOrder());
+        final var timestamp = timestamps.get(2);
+        consumer1.close();
+
+        final Function<Consumer<String>, CompletableFuture<Void>> seekAsync = consumer -> {
+            final var future = seekByFunction ? consumer.seekAsync(__ -> timestamp) : consumer.seekAsync(timestamp);
+            assertEquals(((ConsumerBase<String>) consumer).getIncomingMessageSize(), 0L);
+            assertEquals(((ConsumerBase<String>) consumer).getTotalIncomingMessages(), 0);
+            assertTrue(((ConsumerBase<String>) consumer).getUnAckedMessageTracker().isEmpty());
+            return future;
+        };
+
+        @Cleanup final var consumer2 = pulsarClient.newConsumer(Schema.STRING)
+                .topics(Arrays.asList(topic1, topic2)).subscriptionName("sub-2")
+                .ackTimeout(1, TimeUnit.SECONDS)
+                .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest).subscribe();
+        seekAsync.apply(consumer2).get();
+        final var values = new TreeSet<String>();
+        for (int i = 0; i < 2; i++) {
+            values.add(consumer2.receive().getValue());
+        }
+        assertEquals(values, new TreeSet<>(Arrays.asList("1-1", "2-1")));
+
+        final var valuesInListener = new CopyOnWriteArrayList<String>();
+        @Cleanup final var consumer3 = pulsarClient.newConsumer(Schema.STRING)
+                .topics(Arrays.asList(topic1, topic2)).subscriptionName("sub-3")
+                .messageListener((MessageListener<String>) (__, msg) -> valuesInListener.add(msg.getValue()))
+                .ackTimeout(1, TimeUnit.SECONDS)
+                .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest).subscribe();
+        seekAsync.apply(consumer3).get();
+        if (valuesInListener.isEmpty()) {
+            Awaitility.await().untilAsserted(() -> assertEquals(valuesInListener.size(), 2));
+            assertEquals(valuesInListener.stream().sorted().toList(), Arrays.asList("1-1", "2-1"));
+        } // else: consumer3 has passed messages to the listener before seek, in this case we cannot assume anything
+
+        @Cleanup final var consumer4 = pulsarClient.newConsumer(Schema.STRING)
+                .topics(Arrays.asList(topic1, topic2)).subscriptionName("sub-4")
+                .ackTimeout(1, TimeUnit.SECONDS)
+                .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest).subscribe();
+        seekAsync.apply(consumer4).get();
+        final var valuesInReceiveAsync = new ArrayList<String>();
+        valuesInReceiveAsync.add(consumer4.receiveAsync().get().getValue());
+        valuesInReceiveAsync.add(consumer4.receiveAsync().get().getValue());
+        assertEquals(valuesInReceiveAsync.stream().sorted().toList(), Arrays.asList("1-1", "2-1"));
+    }
 }

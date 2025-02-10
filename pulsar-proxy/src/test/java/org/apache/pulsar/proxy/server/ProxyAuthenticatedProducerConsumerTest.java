@@ -23,6 +23,7 @@ import static org.mockito.Mockito.spy;
 
 import com.google.common.collect.Sets;
 
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
@@ -34,6 +35,7 @@ import org.apache.pulsar.broker.authentication.AuthenticationProviderTls;
 import org.apache.pulsar.broker.authentication.AuthenticationService;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.api.Authentication;
+import org.apache.pulsar.client.api.AuthenticationFactory;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.Producer;
@@ -57,14 +59,23 @@ import org.testng.collections.Maps;
 public class ProxyAuthenticatedProducerConsumerTest extends ProducerConsumerBase {
     private static final Logger log = LoggerFactory.getLogger(ProxyAuthenticatedProducerConsumerTest.class);
 
+    // Root for both proxy and client certificates
     private final String TLS_TRUST_CERT_FILE_PATH = "./src/test/resources/authentication/tls/cacert.pem";
-    private final String TLS_SERVER_CERT_FILE_PATH = "./src/test/resources/authentication/tls/server-cert.pem";
-    private final String TLS_SERVER_KEY_FILE_PATH = "./src/test/resources/authentication/tls/server-key.pem";
+
+    // Borrow certs for broker and proxy from other test
+    private final String TLS_PROXY_CERT_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/proxy-cert.pem";
+    private final String TLS_PROXY_KEY_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/proxy-key.pem";
+    private final String TLS_BROKER_TRUST_CERT_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/broker-cacert.pem";
+    private final String TLS_BROKER_CERT_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/broker-cert.pem";
+    private final String TLS_BROKER_KEY_FILE_PATH = "./src/test/resources/authentication/tls/ProxyWithAuthorizationTest/broker-key.pem";
+
+    // This client cert is a superUser, so use that one
     private final String TLS_CLIENT_CERT_FILE_PATH = "./src/test/resources/authentication/tls/client-cert.pem";
     private final String TLS_CLIENT_KEY_FILE_PATH = "./src/test/resources/authentication/tls/client-key.pem";
 
     private ProxyService proxyService;
     private ProxyConfiguration proxyConfig = new ProxyConfiguration();
+    private Authentication proxyClientAuthentication;
     private final String configClusterName = "test";
 
     @BeforeMethod
@@ -78,20 +89,23 @@ public class ProxyAuthenticatedProducerConsumerTest extends ProducerConsumerBase
         conf.setBrokerServicePortTls(Optional.of(0));
         conf.setWebServicePortTls(Optional.of(0));
         conf.setTlsTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH);
-        conf.setTlsCertificateFilePath(TLS_SERVER_CERT_FILE_PATH);
-        conf.setTlsKeyFilePath(TLS_SERVER_KEY_FILE_PATH);
-        conf.setTlsAllowInsecureConnection(true);
+        conf.setTlsCertificateFilePath(TLS_BROKER_CERT_FILE_PATH);
+        conf.setTlsKeyFilePath(TLS_BROKER_KEY_FILE_PATH);
+        conf.setTlsAllowInsecureConnection(false);
         conf.setNumExecutorThreadPoolSize(5);
 
         Set<String> superUserRoles = new HashSet<>();
         superUserRoles.add("localhost");
         superUserRoles.add("superUser");
+        superUserRoles.add("Proxy");
         conf.setSuperUserRoles(superUserRoles);
+        conf.setProxyRoles(Collections.singleton("Proxy"));
 
         conf.setBrokerClientAuthenticationPlugin(AuthenticationTls.class.getName());
         conf.setBrokerClientAuthenticationParameters(
-                "tlsCertFile:" + TLS_CLIENT_CERT_FILE_PATH + "," + "tlsKeyFile:" + TLS_SERVER_KEY_FILE_PATH);
-        conf.setBrokerClientTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH);
+                "tlsCertFile:" + TLS_CLIENT_CERT_FILE_PATH + "," + "tlsKeyFile:" + TLS_CLIENT_KEY_FILE_PATH);
+        conf.setBrokerClientTrustCertsFilePath(TLS_BROKER_TRUST_CERT_FILE_PATH);
+        conf.setBrokerClientTlsEnabled(true);
         Set<String> providers = new HashSet<>();
         providers.add(AuthenticationProviderTls.class.getName());
         conf.setAuthenticationProviders(providers);
@@ -102,7 +116,6 @@ public class ProxyAuthenticatedProducerConsumerTest extends ProducerConsumerBase
 
         // start proxy service
         proxyConfig.setAuthenticationEnabled(true);
-        proxyConfig.setAuthenticationEnabled(true);
 
         proxyConfig.setServicePort(Optional.of(0));
         proxyConfig.setBrokerProxyAllowedTargetPorts("*");
@@ -110,25 +123,33 @@ public class ProxyAuthenticatedProducerConsumerTest extends ProducerConsumerBase
         proxyConfig.setWebServicePort(Optional.of(0));
         proxyConfig.setWebServicePortTls(Optional.of(0));
         proxyConfig.setTlsEnabledWithBroker(true);
+        // Setting advertised address to localhost to avoid hostname verification failure
+        proxyConfig.setAdvertisedAddress("localhost");
 
         // enable tls and auth&auth at proxy
-        proxyConfig.setTlsCertificateFilePath(TLS_SERVER_CERT_FILE_PATH);
-        proxyConfig.setTlsKeyFilePath(TLS_SERVER_KEY_FILE_PATH);
+        proxyConfig.setTlsCertificateFilePath(TLS_PROXY_CERT_FILE_PATH);
+        proxyConfig.setTlsKeyFilePath(TLS_PROXY_KEY_FILE_PATH);
         proxyConfig.setTlsTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH);
 
         proxyConfig.setBrokerClientAuthenticationPlugin(AuthenticationTls.class.getName());
         proxyConfig.setBrokerClientAuthenticationParameters(
-                "tlsCertFile:" + TLS_CLIENT_CERT_FILE_PATH + "," + "tlsKeyFile:" + TLS_CLIENT_KEY_FILE_PATH);
-        proxyConfig.setBrokerClientTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH);
+                "tlsCertFile:" + TLS_PROXY_CERT_FILE_PATH + "," + "tlsKeyFile:" + TLS_PROXY_KEY_FILE_PATH);
+        proxyConfig.setBrokerClientTrustCertsFilePath(TLS_BROKER_TRUST_CERT_FILE_PATH);
         proxyConfig.setAuthenticationProviders(providers);
 
         proxyConfig.setMetadataStoreUrl(DUMMY_VALUE);
         proxyConfig.setConfigurationMetadataStoreUrl(GLOBAL_DUMMY_VALUE);
+        proxyConfig.setClusterName(configClusterName);
+
+        proxyClientAuthentication = AuthenticationFactory.create(proxyConfig.getBrokerClientAuthenticationPlugin(),
+                proxyConfig.getBrokerClientAuthenticationParameters());
+        proxyClientAuthentication.start();
 
         proxyService = Mockito.spy(new ProxyService(proxyConfig, new AuthenticationService(
-                                                            PulsarConfigurationLoader.convertFrom(proxyConfig))));
-        doReturn(new ZKMetadataStore(mockZooKeeper)).when(proxyService).createLocalMetadataStore();
-        doReturn(new ZKMetadataStore(mockZooKeeperGlobal)).when(proxyService).createConfigurationMetadataStore();
+                                                            PulsarConfigurationLoader.convertFrom(proxyConfig)), proxyClientAuthentication));
+        doReturn(registerCloseable(new ZKMetadataStore(mockZooKeeper))).when(proxyService).createLocalMetadataStore();
+        doReturn(registerCloseable(new ZKMetadataStore(mockZooKeeperGlobal))).when(proxyService)
+                .createConfigurationMetadataStore();
         proxyService.start();
     }
 
@@ -137,6 +158,9 @@ public class ProxyAuthenticatedProducerConsumerTest extends ProducerConsumerBase
     protected void cleanup() throws Exception {
         super.internalCleanup();
         proxyService.close();
+        if (proxyClientAuthentication != null) {
+            proxyClientAuthentication.close();
+        }
     }
 
     /**
@@ -207,10 +231,12 @@ public class ProxyAuthenticatedProducerConsumerTest extends ProducerConsumerBase
     }
 
     protected final PulsarClient createPulsarClient(Authentication auth, String lookupUrl) throws Exception {
-        admin = spy(PulsarAdmin.builder().serviceHttpUrl(brokerUrlTls.toString()).tlsTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH)
-                .allowTlsInsecureConnection(true).authentication(auth).build());
+        closeAdmin();
+        admin = spy(PulsarAdmin.builder().serviceHttpUrl(brokerUrlTls.toString())
+                .tlsTrustCertsFilePath(TLS_BROKER_TRUST_CERT_FILE_PATH)
+                .enableTlsHostnameVerification(true).authentication(auth).build());
         return PulsarClient.builder().serviceUrl(lookupUrl).statsInterval(0, TimeUnit.SECONDS)
-                .tlsTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH).allowTlsInsecureConnection(true).authentication(auth)
+                .tlsTrustCertsFilePath(TLS_TRUST_CERT_FILE_PATH).enableTlsHostnameVerification(true).authentication(auth)
                 .enableTls(true).build();
 
     }

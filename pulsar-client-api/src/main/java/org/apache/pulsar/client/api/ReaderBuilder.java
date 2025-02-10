@@ -150,7 +150,7 @@ public interface ReaderBuilder<T> extends Cloneable {
     /**
      * Set the reader to include the given position of {@link ReaderBuilder#startMessageId(MessageId)}
      *
-     * <p>This configuration option also applies for any cursor reset operation like {@link Reader#seek(MessageId)}.
+     * <p>This configuration option also applies for cursor reset operation {@link Reader#seek(MessageId)}.
      *
      * @return the reader builder instance
      */
@@ -210,6 +210,15 @@ public interface ReaderBuilder<T> extends Cloneable {
      */
     ReaderBuilder<T> cryptoFailureAction(ConsumerCryptoFailureAction action);
 
+    /**
+     * Sets a {@link MessageCrypto}.
+     *
+     * <p>Contains methods to encrypt/decrypt message for End to End Encryption.
+     *
+     * @param messageCrypto message Crypto Object
+     * @return ReaderBuilder instance
+     */
+    ReaderBuilder<T> messageCrypto(MessageCrypto messageCrypto);
     /**
      * Sets the size of the consumer receive queue.
      *

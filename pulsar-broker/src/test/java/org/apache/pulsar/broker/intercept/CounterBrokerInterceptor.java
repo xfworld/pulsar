@@ -20,9 +20,9 @@ package org.apache.pulsar.broker.intercept;
 
 import io.netty.buffer.ByteBuf;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.servlet.FilterChain;
 import javax.servlet.ServletException;
@@ -31,6 +31,7 @@ import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 import lombok.AllArgsConstructor;
 import lombok.Data;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.http.HttpStatus;
@@ -51,20 +52,23 @@ import org.eclipse.jetty.server.Response;
 @Slf4j
 public class CounterBrokerInterceptor implements BrokerInterceptor {
 
-    private AtomicInteger beforeSendCount = new AtomicInteger();
-    private AtomicInteger beforeSendCountAtConsumerLevel = new AtomicInteger();
-    private AtomicInteger count = new AtomicInteger();
-    private AtomicInteger connectionCreationCount = new AtomicInteger();
-    private AtomicInteger producerCount = new AtomicInteger();
-    private AtomicInteger consumerCount = new AtomicInteger();
-    private AtomicInteger messagePublishCount = new AtomicInteger();
-    private AtomicInteger messageCount = new AtomicInteger();
-    private AtomicInteger messageDispatchCount = new AtomicInteger();
-    private AtomicInteger messageAckCount = new AtomicInteger();
-    private AtomicInteger handleAckCount = new AtomicInteger();
-    private AtomicInteger txnCount = new AtomicInteger();
-    private AtomicInteger committedTxnCount = new AtomicInteger();
-    private AtomicInteger abortedTxnCount = new AtomicInteger();
+    private final AtomicInteger beforeSendCount = new AtomicInteger();
+    private final AtomicInteger beforeSendCountAtConsumerLevel = new AtomicInteger();
+    private final AtomicInteger count = new AtomicInteger();
+    private final AtomicInteger connectionCreationCount = new AtomicInteger();
+    private final AtomicInteger producerCount = new AtomicInteger();
+    private final AtomicInteger consumerCount = new AtomicInteger();
+    private final AtomicInteger messagePublishCount = new AtomicInteger();
+    private final AtomicInteger messageCount = new AtomicInteger();
+    private final AtomicInteger messageDispatchCount = new AtomicInteger();
+    private final AtomicInteger messageAckCount = new AtomicInteger();
+    private final AtomicInteger handleAckCount = new AtomicInteger();
+    @Getter
+    private final AtomicInteger handleNackCount = new AtomicInteger();
+    private final AtomicInteger txnCount = new AtomicInteger();
+    private final AtomicInteger committedTxnCount = new AtomicInteger();
+    private final AtomicInteger abortedTxnCount = new AtomicInteger();
+    public static final String NAME = "COUNTER-BROKER-INTERCEPTOR";
 
     public void reset() {
         beforeSendCount.set(0);
@@ -79,9 +83,10 @@ public class CounterBrokerInterceptor implements BrokerInterceptor {
         txnCount.set(0);
         committedTxnCount.set(0);
         abortedTxnCount.set(0);
+        handleNackCount.set(0);
     }
 
-    private List<ResponseEvent> responseList = new ArrayList<>();
+    private final List<ResponseEvent> responseList = new CopyOnWriteArrayList<>();
 
     @Data
     @AllArgsConstructor
@@ -208,6 +213,9 @@ public class CounterBrokerInterceptor implements BrokerInterceptor {
         }
         if (command.getType().equals(BaseCommand.Type.ACK)) {
             handleAckCount.incrementAndGet();
+        }
+        if(command.getType().equals(BaseCommand.Type.REDELIVER_UNACKNOWLEDGED_MESSAGES)) {
+            handleNackCount.incrementAndGet();
         }
         count.incrementAndGet();
     }

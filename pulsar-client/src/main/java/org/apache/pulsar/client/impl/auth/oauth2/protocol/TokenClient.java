@@ -53,6 +53,7 @@ public class TokenClient implements ClientCredentialsExchanger {
     TokenClient(URL tokenUrl, AsyncHttpClient httpClient) {
         if (httpClient == null) {
             DefaultAsyncHttpClientConfig.Builder confBuilder = new DefaultAsyncHttpClientConfig.Builder();
+            confBuilder.setCookieStore(null);
             confBuilder.setUseProxyProperties(true);
             confBuilder.setFollowRedirect(true);
             confBuilder.setConnectTimeout(DEFAULT_CONNECT_TIMEOUT_IN_SECONDS * 1000);
@@ -120,13 +121,13 @@ public class TokenClient implements ClientCredentialsExchanger {
 
             switch (res.getStatusCode()) {
             case 200:
-                return ObjectMapperFactory.getThreadLocal().reader().readValue(res.getResponseBodyAsBytes(),
+                return ObjectMapperFactory.getMapper().reader().readValue(res.getResponseBodyAsBytes(),
                         TokenResult.class);
 
             case 400: // Bad request
             case 401: // Unauthorized
                 throw new TokenExchangeException(
-                        ObjectMapperFactory.getThreadLocal().reader().readValue(res.getResponseBodyAsBytes(),
+                        ObjectMapperFactory.getMapper().reader().readValue(res.getResponseBodyAsBytes(),
                                 TokenError.class));
 
             default:

@@ -69,6 +69,8 @@ public class LeaderElectionTest extends BaseMetadataStoreTest {
 
         leaderElection.close();
 
+        assertEquals(leaderElection.getState(), LeaderElectionState.NoLeader);
+
         assertEquals(cache.get("/my/leader-election").join(), Optional.empty());
     }
 
@@ -203,7 +205,7 @@ public class LeaderElectionTest extends BaseMetadataStoreTest {
                 path, __ -> {
                 });
 
-        store.put(path, ObjectMapperFactory.getThreadLocal().writeValueAsBytes("test-1"), Optional.of(-1L),
+        store.put(path, ObjectMapperFactory.getMapper().writer().writeValueAsBytes("test-1"), Optional.of(-1L),
                 EnumSet.of(CreateOption.Ephemeral)).join();
 
         LeaderElectionState les = le.elect("test-2").join();
@@ -238,7 +240,7 @@ public class LeaderElectionTest extends BaseMetadataStoreTest {
                 path, __ -> {
                 });
 
-        store2.put(path, ObjectMapperFactory.getThreadLocal().writeValueAsBytes("test-1"), Optional.of(-1L),
+        store2.put(path, ObjectMapperFactory.getMapper().writer().writeValueAsBytes("test-1"), Optional.of(-1L),
                 EnumSet.of(CreateOption.Ephemeral)).join();
 
         LeaderElectionState les = le.elect("test-1").join();
@@ -274,7 +276,7 @@ public class LeaderElectionTest extends BaseMetadataStoreTest {
                 path, __ -> {
                 });
 
-        store2.put(path, ObjectMapperFactory.getThreadLocal().writeValueAsBytes("test-1"), Optional.of(-1L),
+        store2.put(path, ObjectMapperFactory.getMapper().writer().writeValueAsBytes("test-1"), Optional.of(-1L),
                 EnumSet.of(CreateOption.Ephemeral)).join();
 
         LeaderElectionState les = le.elect("test-2").join();

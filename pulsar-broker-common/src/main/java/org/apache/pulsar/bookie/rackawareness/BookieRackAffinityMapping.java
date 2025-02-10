@@ -19,6 +19,7 @@
 package org.apache.pulsar.bookie.rackawareness;
 
 import static org.apache.pulsar.metadata.bookkeeper.AbstractMetadataDriver.METADATA_STORE_SCHEME;
+import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -28,8 +29,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import org.apache.bookkeeper.client.DefaultBookieAddressResolver;
 import org.apache.bookkeeper.client.ITopologyAwareEnsemblePlacementPolicy;
 import org.apache.bookkeeper.client.RackChangeNotifier;
+import org.apache.bookkeeper.discover.RegistrationClient;
 import org.apache.bookkeeper.meta.exceptions.Code;
 import org.apache.bookkeeper.meta.exceptions.MetadataException;
 import org.apache.bookkeeper.net.AbstractDNSToSwitchMapping;
@@ -67,7 +70,7 @@ public class BookieRackAffinityMapping extends AbstractDNSToSwitchMapping
     private BookiesRackConfiguration racksWithHost = new BookiesRackConfiguration();
     private Map<String, BookieInfo> bookieInfoMap = new HashMap<>();
 
-    public static MetadataStore createMetadataStore(Configuration conf) throws MetadataException {
+    static MetadataStore getMetadataStore(Configuration conf) throws MetadataException {
         MetadataStore store;
         Object storeProperty = conf.getProperty(METADATA_STORE_INSTANCE);
         if (storeProperty != null) {
@@ -113,13 +116,20 @@ public class BookieRackAffinityMapping extends AbstractDNSToSwitchMapping
         super.setConf(conf);
         MetadataStore store;
         try {
-            store = createMetadataStore(conf);
-            bookieMappingCache = store.getMetadataCache(BookiesRackConfiguration.class);
-            store.registerListener(this::handleUpdates);
-            racksWithHost = bookieMappingCache.get(BOOKIE_INFO_ROOT_PATH).get()
-                    .orElseGet(BookiesRackConfiguration::new);
-            updateRacksWithHost(racksWithHost);
-            for (Map<String, BookieInfo> bookieMapping : racksWithHost.values()) {
+            store = getMetadataStore(conf);
+        } catch (MetadataException e) {
+            throw new RuntimeException(METADATA_STORE_INSTANCE + " failed to init BookieId list");
+        }
+
+        bookieMappingCache = store.getMetadataCache(BookiesRackConfiguration.class);
+        store.registerListener(this::handleUpdates);
+
+        try {
+            var racksWithHost = bookieMappingCache.get(BOOKIE_INFO_ROOT_PATH)
+                    .thenApply(optRes -> optRes.orElseGet(BookiesRackConfiguration::new))
+                    .get();
+
+            for (var bookieMapping : racksWithHost.values()) {
                 for (String address : bookieMapping.keySet()) {
                     bookieAddressListLastTime.add(BookieId.parse(address));
                 }
@@ -128,8 +138,34 @@ public class BookieRackAffinityMapping extends AbstractDNSToSwitchMapping
                             bookieAddressListLastTime);
                 }
             }
-        } catch (InterruptedException | ExecutionException | MetadataException e) {
-            throw new RuntimeException(METADATA_STORE_INSTANCE + " failed to init BookieId list");
+            updateRacksWithHost(racksWithHost);
+        } catch (ExecutionException | InterruptedException e) {
+            LOG.error("Failed to update rack info. ", e);
+            throw new RuntimeException(e);
+        }
+
+        watchAvailableBookies();
+    }
+
+    private void watchAvailableBookies() {
+        BookieAddressResolver bookieAddressResolver = getBookieAddressResolver();
+        if (bookieAddressResolver instanceof DefaultBookieAddressResolver) {
+            try {
+                Field field = DefaultBookieAddressResolver.class.getDeclaredField("registrationClient");
+                field.setAccessible(true);
+                RegistrationClient registrationClient = (RegistrationClient) field.get(bookieAddressResolver);
+                registrationClient.watchWritableBookies(versioned -> {
+                    bookieMappingCache.get(BOOKIE_INFO_ROOT_PATH)
+                            .thenApply(optRes -> optRes.orElseGet(BookiesRackConfiguration::new))
+                            .thenAccept(this::updateRacksWithHost)
+                            .exceptionally(ex -> {
+                                LOG.error("Failed to update rack info. ", ex);
+                                return null;
+                            });
+                });
+            } catch (NoSuchFieldException | IllegalAccessException e) {
+                LOG.error("Failed watch available bookies.", e);
+            }
         }
     }
 
@@ -219,6 +255,7 @@ public class BookieRackAffinityMapping extends AbstractDNSToSwitchMapping
 
         bookieMappingCache.get(BOOKIE_INFO_ROOT_PATH)
                 .thenAccept(optVal -> {
+                    Set<BookieId> bookieIdSet = new HashSet<>();
                     synchronized (this) {
                         LOG.info("Bookie rack info updated to {}. Notifying rackaware policy.", optVal);
                         this.updateRacksWithHost(optVal.orElseGet(BookiesRackConfiguration::new));
@@ -233,12 +270,12 @@ public class BookieRackAffinityMapping extends AbstractDNSToSwitchMapping
                             LOG.debug("Bookies with rack update from {} to {}", bookieAddressListLastTime,
                                     bookieAddressList);
                         }
-                        Set<BookieId> bookieIdSet = new HashSet<>(bookieAddressList);
+                        bookieIdSet.addAll(bookieAddressList);
                         bookieIdSet.addAll(bookieAddressListLastTime);
                         bookieAddressListLastTime = bookieAddressList;
-                        if (rackawarePolicy != null) {
-                            rackawarePolicy.onBookieRackChange(new ArrayList<>(bookieIdSet));
-                        }
+                    }
+                    if (rackawarePolicy != null) {
+                        rackawarePolicy.onBookieRackChange(new ArrayList<>(bookieIdSet));
                     }
                 });
     }

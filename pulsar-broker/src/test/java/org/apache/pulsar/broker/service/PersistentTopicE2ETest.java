@@ -18,14 +18,15 @@
  */
 package org.apache.pulsar.broker.service;
 
-import static org.apache.pulsar.common.protocol.Commands.DEFAULT_CONSUMER_EPOCH;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
-
+import com.google.common.collect.Sets;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.socket.SocketChannel;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
@@ -42,17 +43,17 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-
+import lombok.Cleanup;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.ToString;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerFactoryImpl;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
 import org.apache.bookkeeper.mledger.impl.cache.EntryCache;
 import org.apache.pulsar.broker.PulsarService;
-import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.service.nonpersistent.NonPersistentTopic;
-import org.apache.pulsar.broker.service.persistent.MessageRedeliveryController;
-import org.apache.pulsar.broker.service.persistent.PersistentDispatcherMultipleConsumers;
 import org.apache.pulsar.broker.service.persistent.PersistentSubscription;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.broker.service.schema.SchemaRegistry;
@@ -74,6 +75,7 @@ import org.apache.pulsar.client.api.schema.SchemaDefinition;
 import org.apache.pulsar.client.impl.ConsumerImpl;
 import org.apache.pulsar.client.impl.LookupService;
 import org.apache.pulsar.client.impl.MessageIdImpl;
+import org.apache.pulsar.client.impl.PartitionedProducerImpl;
 import org.apache.pulsar.client.impl.ProducerImpl;
 import org.apache.pulsar.client.impl.PulsarClientImpl;
 import org.apache.pulsar.client.impl.TypedMessageBuilderImpl;
@@ -93,15 +95,6 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
-
-import com.google.common.collect.Sets;
-
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.socket.SocketChannel;
-import lombok.Cleanup;
-import lombok.Data;
-import lombok.EqualsAndHashCode;
-import lombok.ToString;
 
 @Test(groups = "flaky")
 public class PersistentTopicE2ETest extends BrokerTestBase {
@@ -126,17 +119,9 @@ public class PersistentTopicE2ETest extends BrokerTestBase {
     }
 
     @Override
-    protected PulsarService newPulsarService(ServiceConfiguration conf) throws Exception {
-        return new PulsarService(conf) {
-            @Override
-            protected BrokerService newBrokerService(PulsarService pulsar) throws Exception {
-                BrokerService broker = new BrokerService(this, ioEventLoopGroup);
-                broker.setPulsarChannelInitializerFactory((_pulsar, opts) -> {
-                            return new PulsarChannelInitializerForTest(_pulsar, opts);
-                    });
-                return broker;
-            }
-        };
+    protected BrokerService customizeNewBrokerService(BrokerService brokerService) {
+        brokerService.setPulsarChannelInitializerFactory(PulsarChannelInitializerForTest::new);
+        return brokerService;
     }
 
     @AfterMethod(alwaysRun = true)
@@ -609,7 +594,7 @@ public class PersistentTopicE2ETest extends BrokerTestBase {
         pulsarClient.close();
 
         assertNotNull(pulsar.getBrokerService().getTopicReference(topic));
-        assertTrue(((ManagedLedgerFactoryImpl) pulsar.getManagedLedgerFactory()).getManagedLedgers()
+        assertTrue(((ManagedLedgerFactoryImpl) pulsar.getDefaultManagedLedgerFactory()).getManagedLedgers()
                 .containsKey(topicName.getPersistenceNamingEncoding()));
 
         admin.namespaces().unload("prop/ns-abc");
@@ -626,7 +611,7 @@ public class PersistentTopicE2ETest extends BrokerTestBase {
         }
 
         // ML should have been closed as well
-        assertFalse(((ManagedLedgerFactoryImpl) pulsar.getManagedLedgerFactory()).getManagedLedgers()
+        assertFalse(((ManagedLedgerFactoryImpl) pulsar.getDefaultManagedLedgerFactory()).getManagedLedgers()
                 .containsKey(topicName.getPersistenceNamingEncoding()));
     }
 
@@ -1357,6 +1342,49 @@ public class PersistentTopicE2ETest extends BrokerTestBase {
     }
 
     @Test
+    public void testProducerQueueFullBlockingWithPartitionedTopic() throws Exception {
+        final String topicName = "persistent://prop/ns-abc/topic-xyzx2";
+        admin.topics().createPartitionedTopic(topicName, 2);
+
+        @Cleanup
+        PulsarClient client = PulsarClient.builder().serviceUrl(brokerUrl.toString()).build();
+
+        // 1. Producer connect
+        PartitionedProducerImpl<byte[]> producer = (PartitionedProducerImpl<byte[]>) client.newProducer()
+                .topic(topicName)
+                .maxPendingMessages(1)
+                .blockIfQueueFull(true)
+                .sendTimeout(1, TimeUnit.SECONDS)
+                .enableBatching(false)
+                .messageRoutingMode(MessageRoutingMode.SinglePartition)
+                .create();
+
+        // 2. Stop broker
+        cleanup();
+
+        // 2. producer publish messages
+        long startTime = System.nanoTime();
+        producer.sendAsync("msg".getBytes());
+
+        // Verify thread was not blocked
+        long delayNs = System.nanoTime() - startTime;
+        assertTrue(delayNs < TimeUnit.SECONDS.toNanos(1));
+
+        // Next send operation must block, until all the messages in the queue expire
+        startTime = System.nanoTime();
+        producer.sendAsync("msg".getBytes());
+        delayNs = System.nanoTime() - startTime;
+        assertTrue(delayNs > TimeUnit.MILLISECONDS.toNanos(500));
+        assertTrue(delayNs < TimeUnit.MILLISECONDS.toNanos(1500));
+
+        // 4. producer disconnect
+        producer.close();
+
+        // 5. Restart broker
+        setup();
+    }
+
+    @Test
     public void testProducerQueueFullNonBlocking() throws Exception {
         final String topicName = "persistent://prop/ns-abc/topic-xyzx";
         final int messages = 10;
@@ -1512,7 +1540,7 @@ public class PersistentTopicE2ETest extends BrokerTestBase {
         }
         Metrics metric = null;
 
-        // sleep 1 sec to caclulate metrics per second
+        // sleep 1 sec to calculate metrics per second
         Thread.sleep(1000);
         brokerService.updateRates();
         List<Metrics> metrics = brokerService.getTopicMetrics();
@@ -1618,6 +1646,38 @@ public class PersistentTopicE2ETest extends BrokerTestBase {
         assertEquals((long) map.get("brk_connection_closed_total_count"), 2);
         assertEquals((long) map.get("brk_connection_create_success_count"), 1);
         assertEquals((long) map.get("brk_connection_create_fail_count"), 1);
+    }
+
+    /**
+     * There is detailed info about this test.
+     * see: https://github.com/apache/pulsar/issues/10150#issuecomment-1112380074
+     */
+    @Test
+    public void testBrokerHealthCheckStatus() throws Exception {
+
+        cleanup();
+        conf.setSystemTopicEnabled(false);
+        conf.setTopicLevelPoliciesEnabled(false);
+        conf.setHealthCheckMetricsUpdateTimeInSeconds(60);
+        setup();
+        BrokerService brokerService = this.pulsar.getBrokerService();
+
+        Map<String, Object> map = null;
+
+        brokerService.checkHealth().get();
+        brokerService.updateRates();
+        Awaitility.await().until(() -> this.activeCount.get() == 1);
+        List<Metrics> metrics = brokerService.getTopicMetrics();
+        System.out.println(metrics);
+
+        for (int i = 0; i < metrics.size(); i++) {
+            if (metrics.get(i).getDimensions().containsValue("broker_health")) {
+                map = metrics.get(i).getMetrics();
+                break;
+            }
+        }
+        assertNotNull(map);
+        assertEquals(map.get("brk_health"), 1);
     }
 
     @Test
@@ -1729,90 +1789,6 @@ public class PersistentTopicE2ETest extends BrokerTestBase {
         // Verify no other messages are redelivered
         msg = consumer.receive(100, TimeUnit.MILLISECONDS);
         assertNull(msg);
-
-        consumer.close();
-        producer.close();
-    }
-
-    /**
-     * Verify: 1. Broker should not replay already acknowledged messages 2. Dispatcher should not stuck while
-     * dispatching new messages due to previous-replay of invalid/already-acked messages
-     *
-     * @throws Exception
-     */
-    @Test
-    public void testMessageReplay() throws Exception {
-
-        final String topicName = "persistent://prop/ns-abc/topic2";
-        final String subName = "sub2";
-
-        Message<byte[]> msg;
-        int totalMessages = 10;
-        int replayIndex = totalMessages / 2;
-
-        Consumer<byte[]> consumer = pulsarClient.newConsumer().topic(topicName).subscriptionName(subName)
-                .subscriptionType(SubscriptionType.Shared).receiverQueueSize(1).subscribe();
-        Producer<byte[]> producer = pulsarClient.newProducer()
-            .topic(topicName)
-            .enableBatching(false)
-            .messageRoutingMode(MessageRoutingMode.SinglePartition)
-            .create();
-
-        PersistentTopic topicRef = (PersistentTopic) pulsar.getBrokerService().getTopicReference(topicName).get();
-        assertNotNull(topicRef);
-        PersistentSubscription subRef = topicRef.getSubscription(subName);
-        PersistentDispatcherMultipleConsumers dispatcher = (PersistentDispatcherMultipleConsumers) subRef
-                .getDispatcher();
-        Field redeliveryMessagesField = PersistentDispatcherMultipleConsumers.class
-                .getDeclaredField("redeliveryMessages");
-        redeliveryMessagesField.setAccessible(true);
-        MessageRedeliveryController redeliveryMessages = new MessageRedeliveryController(true);
-
-        assertNotNull(subRef);
-
-        // (1) Produce messages
-        for (int i = 0; i < totalMessages; i++) {
-            String message = "my-message-" + i;
-            producer.send(message.getBytes());
-        }
-
-        MessageIdImpl firstAckedMsg = null;
-        // (2) Consume and ack messages except first message
-        for (int i = 0; i < totalMessages; i++) {
-            msg = consumer.receive();
-            consumer.acknowledge(msg);
-            MessageIdImpl msgId = (MessageIdImpl) msg.getMessageId();
-            if (i == 0) {
-                firstAckedMsg = msgId;
-            }
-            if (i < replayIndex) {
-                // (3) accumulate acked messages for replay
-                redeliveryMessages.add(msgId.getLedgerId(), msgId.getEntryId());
-            }
-        }
-
-        // (4) redelivery : should redeliver only unacked messages
-        Thread.sleep(1000);
-
-        redeliveryMessagesField.set(dispatcher, redeliveryMessages);
-        // (a) redelivery with all acked-message should clear messageReply bucket
-        dispatcher.redeliverUnacknowledgedMessages(dispatcher.getConsumers().get(0), DEFAULT_CONSUMER_EPOCH);
-        Awaitility.await().atMost(10, TimeUnit.SECONDS).until(() -> {
-            return redeliveryMessages.isEmpty();
-        });
-        assertTrue(redeliveryMessages.isEmpty());
-
-        // (b) fill messageReplyBucket with already acked entry again: and try to publish new msg and read it
-        redeliveryMessages.add(firstAckedMsg.getLedgerId(), firstAckedMsg.getEntryId());
-        redeliveryMessagesField.set(dispatcher, redeliveryMessages);
-        // send new message
-        final String testMsg = "testMsg";
-        producer.send(testMsg.getBytes());
-        // consumer should be able to receive only new message and not the
-        dispatcher.consumerFlow(dispatcher.getConsumers().get(0), 1);
-        msg = consumer.receive(1, TimeUnit.SECONDS);
-        assertNotNull(msg);
-        assertEquals(msg.getData(), testMsg.getBytes());
 
         consumer.close();
         producer.close();
@@ -1961,8 +1937,6 @@ public class PersistentTopicE2ETest extends BrokerTestBase {
             ch.pipeline().remove("handler");
             PersistentTopicE2ETest.ServerCnxForTest serverCnxForTest = new PersistentTopicE2ETest.ServerCnxForTest(this.pulsar, this.opts.getListenerName());
             ch.pipeline().addAfter("flowController", "testHandler", serverCnxForTest);
-            //override parent
-            connections.put(ch.remoteAddress(), serverCnxForTest);
         }
 
     }

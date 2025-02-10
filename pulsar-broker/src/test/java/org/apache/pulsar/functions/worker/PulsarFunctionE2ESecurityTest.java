@@ -27,7 +27,6 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotEquals;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
-
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import io.jsonwebtoken.SignatureAlgorithm;
@@ -35,6 +34,7 @@ import java.lang.reflect.Method;
 import java.net.URL;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
@@ -124,7 +124,7 @@ public class PulsarFunctionE2ESecurityTest {
         bkEnsemble = new LocalBookkeeperEnsemble(3, 0, () -> 0);
         bkEnsemble.start();
 
-        config = spy(ServiceConfiguration.class);
+        config = new ServiceConfiguration();
         config.setClusterName("use");
         Set<String> superUsers = Sets.newHashSet(ADMIN_SUBJECT);
         config.setSuperUserRoles(superUsers);
@@ -216,11 +216,26 @@ public class PulsarFunctionE2ESecurityTest {
     void shutdown() throws Exception {
         try {
             log.info("--- Shutting down ---");
-            pulsarClient.close();
-            superUserAdmin.close();
-            functionsWorkerService.stop();
-            pulsar.close();
-            bkEnsemble.stop();
+            if (pulsarClient != null) {
+                pulsarClient.close();
+                pulsarClient = null;
+            }
+            if (superUserAdmin != null) {
+                superUserAdmin.close();
+                superUserAdmin = null;
+            }
+            if (functionsWorkerService != null) {
+                functionsWorkerService.stop();
+                functionsWorkerService = null;
+            }
+            if (pulsar != null) {
+                pulsar.close();
+                pulsar = null;
+            }
+            if (bkEnsemble != null) {
+                bkEnsemble.stop();
+                bkEnsemble = null;
+            }
         } finally {
             if (tempDirectory != null) {
                 tempDirectory.delete();
@@ -241,7 +256,8 @@ public class PulsarFunctionE2ESecurityTest {
                 org.apache.pulsar.functions.worker.scheduler.RoundRobinScheduler.class.getName());
         workerConfig.setFunctionRuntimeFactoryClassName(ThreadRuntimeFactory.class.getName());
         workerConfig.setFunctionRuntimeFactoryConfigs(
-                ObjectMapperFactory.getThreadLocal().convertValue(new ThreadRuntimeFactoryConfig().setThreadGroupName("use"), Map.class));
+                ObjectMapperFactory.getMapper().getObjectMapper()
+                        .convertValue(new ThreadRuntimeFactoryConfig().setThreadGroupName("use"), Map.class));
         // worker talks to local broker
         workerConfig.setPulsarServiceUrl("pulsar://127.0.0.1:" + config.getBrokerServicePort().get());
         workerConfig.setPulsarWebServiceUrl("http://127.0.0.1:" + config.getWebServicePort().get());
@@ -267,8 +283,12 @@ public class PulsarFunctionE2ESecurityTest {
         workerConfig.setAuthorizationEnabled(config.isAuthorizationEnabled());
         workerConfig.setAuthorizationProvider(config.getAuthorizationProvider());
 
+        List<String> urlPatterns =
+                List.of(getPulsarApiExamplesJar().getParentFile().toURI() + ".*", "http://127\\.0\\.0\\.1:.*");
+        workerConfig.setAdditionalEnabledConnectorUrlPatterns(urlPatterns);
+        workerConfig.setAdditionalEnabledFunctionsUrlPatterns(urlPatterns);
+
         PulsarWorkerService workerService = new PulsarWorkerService();
-        workerService.init(workerConfig, null, false);
         return workerService;
     }
 

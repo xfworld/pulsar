@@ -19,7 +19,9 @@
 package org.apache.pulsar.testclient;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import io.opentelemetry.sdk.autoconfigure.AutoConfiguredOpenTelemetrySdk;
 import java.lang.management.ManagementFactory;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -67,7 +69,7 @@ public class PerfClientUtils {
             throws PulsarClientException.UnsupportedAuthenticationException {
 
         ClientBuilder clientBuilder = PulsarClient.builder()
-                .memoryLimit(0, SizeUnit.BYTES)
+                .memoryLimit(arguments.memoryLimit, SizeUnit.BYTES)
                 .serviceUrl(arguments.serviceURL)
                 .connectionsPerBroker(arguments.maxConnections)
                 .ioThreads(arguments.ioThreads)
@@ -76,10 +78,20 @@ public class PerfClientUtils {
                 .listenerThreads(arguments.listenerThreads)
                 .tlsTrustCertsFilePath(arguments.tlsTrustCertsFilePath)
                 .maxLookupRequests(arguments.maxLookupRequest)
-                .proxyServiceUrl(arguments.proxyServiceURL, arguments.proxyProtocol);
+                .proxyServiceUrl(arguments.proxyServiceURL, arguments.proxyProtocol)
+                .openTelemetry(AutoConfiguredOpenTelemetrySdk.builder()
+                        .addPropertiesSupplier(() -> Map.of(
+                                "otel.sdk.disabled", "true"
+                        ))
+                        .build().getOpenTelemetrySdk());
 
         if (isNotBlank(arguments.authPluginClassName)) {
             clientBuilder.authentication(arguments.authPluginClassName, arguments.authParams);
+        }
+
+        if (isNotBlank(arguments.sslfactoryPlugin)) {
+            clientBuilder.sslFactoryPlugin(arguments.sslfactoryPlugin)
+                    .sslFactoryPluginParams(arguments.sslFactoryPluginParams);
         }
 
         if (arguments.tlsAllowInsecureConnection != null) {
@@ -108,6 +120,11 @@ public class PerfClientUtils {
             pulsarAdminBuilder.authentication(arguments.authPluginClassName, arguments.authParams);
         }
 
+        if (isNotBlank(arguments.sslfactoryPlugin)) {
+            pulsarAdminBuilder.sslFactoryPlugin(arguments.sslfactoryPlugin)
+                    .sslFactoryPluginParams(arguments.sslFactoryPluginParams);
+        }
+
         if (arguments.tlsAllowInsecureConnection != null) {
             pulsarAdminBuilder.allowTlsInsecureConnection(arguments.tlsAllowInsecureConnection);
         }
@@ -118,6 +135,5 @@ public class PerfClientUtils {
 
         return pulsarAdminBuilder;
     }
-
 
 }

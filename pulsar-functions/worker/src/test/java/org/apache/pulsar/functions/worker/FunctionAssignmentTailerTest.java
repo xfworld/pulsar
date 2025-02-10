@@ -60,17 +60,20 @@ import org.testng.annotations.Test;
 @Slf4j
 public class FunctionAssignmentTailerTest {
 
+    private static final String CLUSTER_NAME = "test-cluster";
+
     @Test(timeOut = 10000)
     public void testErrorNotifier() throws Exception {
         WorkerConfig workerConfig = new WorkerConfig();
         workerConfig.setWorkerId("worker-1");
         workerConfig.setFunctionRuntimeFactoryClassName(ThreadRuntimeFactory.class.getName());
         workerConfig.setFunctionRuntimeFactoryConfigs(
-                ObjectMapperFactory.getThreadLocal().convertValue(
+                ObjectMapperFactory.getMapper().getObjectMapper().convertValue(
                         new ThreadRuntimeFactoryConfig().setThreadGroupName("test"), Map.class));
         workerConfig.setPulsarServiceUrl("pulsar://localhost:6650");
         workerConfig.setStateStorageServiceUrl("foo");
         workerConfig.setFunctionAssignmentTopicName("assignments");
+        workerConfig.setPulsarFunctionsCluster(CLUSTER_NAME);
 
         Function.FunctionMetaData function1 = Function.FunctionMetaData.newBuilder().setFunctionDetails(
                 Function.FunctionDetails.newBuilder()
@@ -178,11 +181,12 @@ public class FunctionAssignmentTailerTest {
         workerConfig.setWorkerId("worker-1");
         workerConfig.setFunctionRuntimeFactoryClassName(ThreadRuntimeFactory.class.getName());
         workerConfig.setFunctionRuntimeFactoryConfigs(
-                ObjectMapperFactory.getThreadLocal().convertValue(
+                ObjectMapperFactory.getMapper().getObjectMapper().convertValue(
                         new ThreadRuntimeFactoryConfig().setThreadGroupName("test"), Map.class));
         workerConfig.setPulsarServiceUrl("pulsar://localhost:6650");
         workerConfig.setStateStorageServiceUrl("foo");
         workerConfig.setFunctionAssignmentTopicName("assignments");
+        workerConfig.setPulsarFunctionsCluster(CLUSTER_NAME);
 
         Function.FunctionMetaData function1 = Function.FunctionMetaData.newBuilder().setFunctionDetails(
                 Function.FunctionDetails.newBuilder()
@@ -302,11 +306,12 @@ public class FunctionAssignmentTailerTest {
         workerConfig.setWorkerId("worker-1");
         workerConfig.setFunctionRuntimeFactoryClassName(ThreadRuntimeFactory.class.getName());
         workerConfig.setFunctionRuntimeFactoryConfigs(
-                ObjectMapperFactory.getThreadLocal().convertValue(
+                ObjectMapperFactory.getMapper().getObjectMapper().convertValue(
                         new ThreadRuntimeFactoryConfig().setThreadGroupName("test"), Map.class));
         workerConfig.setPulsarServiceUrl("pulsar://localhost:6650");
         workerConfig.setStateStorageServiceUrl("foo");
         workerConfig.setFunctionAssignmentTopicName("assignments");
+        workerConfig.setPulsarFunctionsCluster(CLUSTER_NAME);
 
         Function.FunctionMetaData function1 = Function.FunctionMetaData.newBuilder().setFunctionDetails(
                 Function.FunctionDetails.newBuilder()

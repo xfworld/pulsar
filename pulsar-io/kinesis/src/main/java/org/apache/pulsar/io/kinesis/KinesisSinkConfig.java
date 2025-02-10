@@ -18,13 +18,14 @@
  */
 package org.apache.pulsar.io.kinesis;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
-import java.io.File;
-import java.io.IOException;
+import static com.google.common.base.Preconditions.checkArgument;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 import java.io.Serializable;
+import java.util.Map;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
+import org.apache.pulsar.io.common.IOConfigUtils;
+import org.apache.pulsar.io.core.SinkContext;
 import org.apache.pulsar.io.core.annotations.FieldDoc;
 
 @Data
@@ -103,9 +104,22 @@ public class KinesisSinkConfig extends BaseKinesisConfig implements Serializable
             help = "The maximum delay(in milliseconds) between retries.")
     private long retryMaxDelayInMillis = 60000;
 
-    public static KinesisSinkConfig load(String yamlFile) throws IOException {
-        ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
-        return mapper.readValue(new File(yamlFile), KinesisSinkConfig.class);
+    @FieldDoc(
+            required = false,
+            defaultValue = "",
+            help = "Path to the native Amazon Kinesis Producer Library (KPL) binary.\n"
+                    + "Only use this setting if you want to use a custom build of the native code.\n"
+                    + "This setting can also be set with the environment variable `PULSAR_IO_KINESIS_KPL_PATH`.\n"
+                    + "If not set, the Kinesis sink will use the built-in native executable."
+    )
+    private String nativeExecutable = System.getenv("PULSAR_IO_KINESIS_KPL_PATH");
+
+    public static KinesisSinkConfig load(Map<String, Object> config, SinkContext sinkContext) {
+        KinesisSinkConfig kinesisSinkConfig = IOConfigUtils.loadWithSecrets(config, KinesisSinkConfig.class, sinkContext);
+        checkArgument(isNotBlank(kinesisSinkConfig.getAwsRegion())
+                        || (isNotBlank(kinesisSinkConfig.getAwsEndpoint()) && isNotBlank(kinesisSinkConfig.getCloudwatchEndpoint())),
+                "Either \"awsRegion\" must be set OR all of [\"awsEndpoint\", \"cloudwatchEndpoint\"] must be set.");
+        return kinesisSinkConfig;
     }
 
     public enum MessageFormat {
@@ -145,4 +159,17 @@ public class KinesisSinkConfig extends BaseKinesisConfig implements Serializable
         FULL_MESSAGE_IN_JSON_EXPAND_VALUE
     }
 
+    @FieldDoc(
+            required = false,
+            defaultValue = "",
+            help = "Custom AWS STS endpoint"
+    )
+    private String awsStsEndpoint = "";
+
+    @FieldDoc(
+            required = false,
+            defaultValue = "",
+            help = "Custom AWS STS port to connect to"
+    )
+    private Integer awsStsPort;
 }

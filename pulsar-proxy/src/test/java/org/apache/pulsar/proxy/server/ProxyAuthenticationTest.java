@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 import javax.naming.AuthenticationException;
 
@@ -42,6 +43,7 @@ import org.apache.pulsar.broker.authentication.AuthenticationService;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.api.Authentication;
 import org.apache.pulsar.client.api.AuthenticationDataProvider;
+import org.apache.pulsar.client.api.AuthenticationFactory;
 import org.apache.pulsar.client.api.ProducerConsumerBase;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.PulsarClientException;
@@ -57,6 +59,7 @@ import org.testng.annotations.Test;
 
 public class ProxyAuthenticationTest extends ProducerConsumerBase {
 	private static final Logger log = LoggerFactory.getLogger(ProxyAuthenticationTest.class);
+	private static final String CLUSTER_NAME = "test";
 
 	public static class BasicAuthenticationData implements AuthenticationDataProvider {
 		private final String authParam;
@@ -136,7 +139,7 @@ public class ProxyAuthenticationTest extends ProducerConsumerBase {
 		}
 
 		@Override
-		public String authenticate(AuthenticationDataSource authData) throws AuthenticationException {
+		public CompletableFuture<String> authenticateAsync(AuthenticationDataSource authData) {
 			String commandData = null;
 			if (authData.hasDataFromCommand()) {
 				commandData = authData.getCommandData();
@@ -150,9 +153,12 @@ public class ProxyAuthenticationTest extends ProducerConsumerBase {
 			long currentTimeInMillis = System.currentTimeMillis();
 			if (expiryTimeInMillis < currentTimeInMillis) {
 				log.warn("Auth failed due to timeout");
-				throw new AuthenticationException("Authentication data has been expired");
+				return CompletableFuture
+						.failedFuture(new AuthenticationException("Authentication data has been expired"));
 			}
-			return element.get("entityType").getAsString();
+			final String result = element.get("entityType").getAsString();
+			// Run in another thread to attempt to test the async logic
+			return CompletableFuture.supplyAsync(() -> result);
 		}
 	}
 
@@ -164,7 +170,7 @@ public class ProxyAuthenticationTest extends ProducerConsumerBase {
 		conf.setBrokerClientAuthenticationPlugin(BasicAuthentication.class.getName());
 		// Expires after an hour
 		conf.setBrokerClientAuthenticationParameters(
-				"entityType:broker,expiryTime:" + (System.currentTimeMillis() + 3600 * 1000));
+				"entityType:admin,expiryTime:" + (System.currentTimeMillis() + 3600 * 1000));
 
 		Set<String> superUserRoles = new HashSet<>();
 		superUserRoles.add("admin");
@@ -174,7 +180,7 @@ public class ProxyAuthenticationTest extends ProducerConsumerBase {
 		providers.add(BasicAuthenticationProvider.class.getName());
 		conf.setAuthenticationProviders(providers);
 
-		conf.setClusterName("test");
+		conf.setClusterName(CLUSTER_NAME);
 		Set<String> proxyRoles = new HashSet<>();
 		proxyRoles.add("proxy");
 		conf.setProxyRoles(proxyRoles);
@@ -218,6 +224,7 @@ public class ProxyAuthenticationTest extends ProducerConsumerBase {
 		proxyConfig.setBrokerProxyAllowedTargetPorts("*");
 		proxyConfig.setWebServicePort(Optional.of(0));
 		proxyConfig.setBrokerServiceURL(pulsar.getBrokerServiceUrl());
+		proxyConfig.setClusterName(CLUSTER_NAME);
 
 		proxyConfig.setBrokerClientAuthenticationPlugin(BasicAuthentication.class.getName());
 		proxyConfig.setBrokerClientAuthenticationParameters(proxyAuthParams);
@@ -229,7 +236,11 @@ public class ProxyAuthenticationTest extends ProducerConsumerBase {
                 AuthenticationService authenticationService = new AuthenticationService(
                         PulsarConfigurationLoader.convertFrom(proxyConfig));
 		@Cleanup
-		ProxyService proxyService = new ProxyService(proxyConfig, authenticationService);
+		final Authentication proxyClientAuthentication = AuthenticationFactory.create(proxyConfig.getBrokerClientAuthenticationPlugin(),
+				proxyConfig.getBrokerClientAuthenticationParameters());
+		proxyClientAuthentication.start();
+		@Cleanup
+		ProxyService proxyService = new ProxyService(proxyConfig, authenticationService, proxyClientAuthentication);
 
 		proxyService.start();
 		final String proxyServiceUrl = proxyService.getServiceUrl();
@@ -251,6 +262,7 @@ public class ProxyAuthenticationTest extends ProducerConsumerBase {
 	private void updateAdminClient() throws PulsarClientException {
 		// Expires after an hour
 		String adminAuthParams = "entityType:admin,expiryTime:" + (System.currentTimeMillis() + 3600 * 1000);
+		closeAdmin();
 		admin = spy(PulsarAdmin.builder().serviceHttpUrl(brokerUrl.toString())
 				.authentication(BasicAuthentication.class.getName(), adminAuthParams).build());
 	}
